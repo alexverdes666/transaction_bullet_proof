@@ -8,13 +8,19 @@ import LogoutButton from './LogoutButton';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+export const metadata = { robots: { index: false, follow: false } };
 
 export default async function Dashboard() {
   const user = await getSessionUser();
   if (!user) redirect('/login');
 
   await connectDb();
-  const recent = await Scan.find({ userId: user.id }).sort({ createdAt: -1 }).limit(10).lean();
+  // Only the scalar columns rendered below — avoid hydrating the full report blob.
+  const recent = await Scan.find({ userId: user.id })
+    .select('token verdict riskScore createdAt')
+    .sort({ createdAt: -1 })
+    .limit(10)
+    .lean();
 
   return (
     <main className="flex-1 bg-neutral-950 text-neutral-100">
@@ -64,7 +70,7 @@ function Verdict({ v, score }: { v: string; score: number }) {
     SAFE: 'text-emerald-400',
     SUSPICIOUS: 'text-yellow-400',
     HONEYPOT: 'text-red-400',
-    ERROR: 'text-neutral-500',
+    ERROR: 'text-neutral-400',
   };
-  return <span className={`font-semibold ${map[v] ?? ''}`}>{v} <span className="text-neutral-500">({score})</span></span>;
+  return <span className={`font-semibold ${map[v] ?? ''}`}>{v} <span className="text-neutral-400">({score})</span></span>;
 }

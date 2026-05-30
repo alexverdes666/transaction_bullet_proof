@@ -45,7 +45,9 @@ export type HoneypotReport = z.infer<typeof reportSchema>;
 
 export async function runScanOnWorker(token: string): Promise<HoneypotReport> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 120_000);
+  // Nest under the scan route's maxDuration (120s) and above the worker's own
+  // internal budget, so the web side aborts cleanly before the platform kills us.
+  const timeout = setTimeout(() => controller.abort(), 90_000);
   try {
     const res = await fetch(`${env.workerUrl.replace(/\/$/, '')}/scan`, {
       method: 'POST',

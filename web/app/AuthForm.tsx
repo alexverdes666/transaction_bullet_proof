@@ -35,32 +35,34 @@ export default function AuthForm({ mode }: { mode: 'login' | 'register' }) {
   return (
     <main className="flex-1 flex items-center justify-center bg-neutral-950 text-neutral-100 px-4">
       <form onSubmit={submit} className="w-full max-w-sm space-y-4 p-8 rounded-xl border border-neutral-800 bg-neutral-900">
-        <Link href="/" className="text-sm text-neutral-500 hover:text-neutral-300">← Bullet Proof</Link>
+        <Link href="/" className="text-sm text-neutral-400 hover:text-neutral-300">← Bullet Proof</Link>
         <h1 className="text-xl font-bold">{isRegister ? 'Create your account' : 'Welcome back'}</h1>
 
         <div>
-          <label className="text-xs text-neutral-400">Email</label>
+          <label htmlFor="auth-email" className="text-xs text-neutral-300">Email</label>
           <input
+            id="auth-email" name="email"
             type="email" value={email} onChange={(e) => setEmail(e.target.value)} required autoComplete="email"
             className="mt-1 w-full rounded-md bg-neutral-800 border border-neutral-700 px-3 py-2 text-sm outline-none focus:border-neutral-500"
           />
         </div>
         <div>
-          <label className="text-xs text-neutral-400">Password{isRegister && ' (min 10 characters)'}</label>
+          <label htmlFor="auth-password" className="text-xs text-neutral-300">Password{isRegister && ' (min 10 characters)'}</label>
           <input
+            id="auth-password" name="password"
             type="password" value={password} onChange={(e) => setPassword(e.target.value)} required
             autoComplete={isRegister ? 'new-password' : 'current-password'}
             className="mt-1 w-full rounded-md bg-neutral-800 border border-neutral-700 px-3 py-2 text-sm outline-none focus:border-neutral-500"
           />
         </div>
 
-        {error && <p className="text-sm text-red-400">{error}</p>}
+        {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
 
         <button disabled={busy} className="w-full rounded-md bg-emerald-500 text-neutral-950 py-2 text-sm font-semibold disabled:opacity-50 hover:bg-emerald-400">
           {busy ? 'Please wait…' : isRegister ? 'Create account' : 'Log in'}
         </button>
 
-        <p className="text-sm text-neutral-500 text-center">
+        <p className="text-sm text-neutral-400 text-center">
           {isRegister ? (
             <>Already have an account? <Link href="/login" className="text-neutral-300 hover:text-white">Log in</Link></>
           ) : (

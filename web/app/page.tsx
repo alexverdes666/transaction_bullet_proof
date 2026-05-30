@@ -4,11 +4,29 @@ import { getSessionUser } from '@/lib/session';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? 'https://bulletproof.example';
+
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'SoftwareApplication',
+  name: 'Bullet Proof',
+  applicationCategory: 'SecurityApplication',
+  operatingSystem: 'Web',
+  url: SITE_URL,
+  description:
+    'Bullet Proof safely simulates buying and selling any crypto token to detect honeypots and hidden taxes before you risk a cent.',
+  offers: { '@type': 'Offer', category: 'Paid' },
+};
+
 export default async function Home() {
   const user = await getSessionUser();
 
   return (
     <main className="flex-1 bg-neutral-950 text-neutral-100">
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+      />
       <nav className="flex items-center justify-between px-6 py-4 border-b border-neutral-900">
         <span className="font-bold tracking-tight">🛡 Bullet Proof</span>
         <div className="flex gap-3 text-sm">
@@ -58,7 +76,7 @@ export default async function Home() {
           <li><strong>3.</strong> We immediately try to <em>sell</em> it back.</li>
           <li><strong>4.</strong> We measure exactly what happened and give you a clear verdict.</li>
         </ol>
-        <p className="mt-6 text-center text-neutral-500 text-sm">No real money is ever at risk during a scan.</p>
+        <p className="mt-6 text-center text-neutral-400 text-sm">No real money is ever at risk during a scan.</p>
       </section>
     </main>
   );

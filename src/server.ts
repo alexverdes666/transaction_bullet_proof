@@ -12,6 +12,7 @@
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { isAddress } from 'viem';
 import { config } from './config.js';
 import { runScan } from './scan.js';
@@ -28,8 +29,14 @@ const MAX_BODY_BYTES = 16 * 1024;
 /** Max scans running at once. Each spawns its own anvil fork (heavy); cap to
  *  protect the box from OOM / port exhaustion under a request burst. */
 const MAX_CONCURRENT_SCANS = 3;
-/** Hard ceiling per scan; on timeout we still tear the fork down (see below). */
-const SCAN_TIMEOUT_MS = 90_000;
+/**
+ * REL-1: hard ceiling for the ENTIRE scan, fork.start() INCLUDED. Previously the
+ * 90s timer started only after the fork was up, so total worker time was
+ * spawn + 90s + teardown and could blow past the client/platform 120s budget.
+ * We now race start()+runScan() against this single deadline so the whole request
+ * is bounded well under 120s.
+ */
+const SCAN_TIMEOUT_MS = 75_000;
 /** SEC-9: clamp the optional per-request buy size. The SaaS never sends buyEth,
  *  but the worker must be defensive: an unbounded value could try to fund/spend
  *  an absurd amount on the fork. Accept only a finite number in (0, MAX_BUY_ETH]. */
@@ -80,15 +87,16 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
 }
 
 /**
- * Run a scan but never let it exceed SCAN_TIMEOUT_MS. We own the fork via an
- * explicit AnvilFork so that, on timeout, we can still tear it down (otherwise a
- * stuck scan would orphan an anvil process). The losing branch of the race is
- * cleaned up regardless of which side wins.
+ * Run a scan but never let the WHOLE operation exceed SCAN_TIMEOUT_MS — the
+ * deadline now covers fork.start() too (REL-1), not just runScan(). We own the
+ * fork via an explicit AnvilFork so that, on timeout, we can still tear it down
+ * (otherwise a stuck scan/spawn would orphan an anvil process). The fork is
+ * stopped on every exit path, including the timeout branch where start() may not
+ * even have completed (stop() is a safe no-op on a fork that never started).
  */
 async function runScanWithTimeout(token: string, buyEth: number | undefined) {
   const { AnvilFork } = await import('./anvil.js');
   const fork = new AnvilFork();
-  await fork.start({ quiet: true });
 
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<never>((_resolve, reject) => {
@@ -98,23 +106,94 @@ async function runScanWithTimeout(token: string, buyEth: number | undefined) {
     );
   });
 
+  // start() + runScan() as one awaitable so the single deadline bounds the lot.
+  const work = (async () => {
+    await fork.start({ quiet: true });
+    return runScan({ token, fork, ...(buyEth !== undefined ? { buyEth } : {}) });
+  })();
+
   try {
-    return await Promise.race([
-      runScan({ token, fork, ...(buyEth !== undefined ? { buyEth } : {}) }),
-      timeout,
-    ]);
+    return await Promise.race([work, timeout]);
   } finally {
     if (timer) clearTimeout(timer);
-    // We started the fork, so we always stop it — including on the timeout path,
-    // where runScan never reaches its own teardown.
+    // We own the fork, so we always stop it — including on the timeout path,
+    // where start()/runScan never reach their own teardown. If start() is still
+    // in flight when we time out, let it settle first so stop() can reap a child
+    // that finished spawning after the deadline (avoid a leaked anvil process).
+    await work.catch(() => {});
     await fork.stop();
   }
+}
+
+/**
+ * REL-2: readiness check. Unlike the cheap /health liveness stub, this verifies
+ * the worker can actually perform a scan: (a) the anvil binary resolves, and
+ * (b) at least one configured upstream RPC answers `eth_blockNumber`. The result
+ * is cached briefly so a load balancer polling /ready can't hammer the RPCs.
+ */
+const READY_CACHE_MS = 30_000;
+const READY_PROBE_TIMEOUT_MS = 5_000;
+let readyCache: { at: number; result: { ready: boolean; anvil: boolean; rpc: boolean } } | null =
+  null;
+
+/** True if ANVIL_BIN resolves to an existing file, or is a bare command name
+ *  (resolved from PATH at spawn time — we can't cheaply stat that, so accept). */
+function anvilBinResolves(): boolean {
+  const bin = config.fork.anvilBin;
+  // A path-like value (contains a separator) must exist on disk; a bare name
+  // like "anvil" is resolved via PATH by spawn, so we optimistically accept it.
+  if (/[\\/]/.test(bin)) return existsSync(bin);
+  return true;
+}
+
+/** Probe configured upstream RPCs; true once one answers eth_blockNumber. */
+async function anyRpcHealthy(): Promise<boolean> {
+  const candidates = config.fork.rpcUrl
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  for (const url of candidates) {
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), READY_PROBE_TIMEOUT_MS);
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: [] }),
+        signal: ctrl.signal,
+      });
+      clearTimeout(t);
+      const json = (await res.json()) as { result?: string };
+      if (res.ok && typeof json.result === 'string') return true;
+    } catch {
+      /* try the next candidate */
+    }
+  }
+  return false;
+}
+
+async function checkReadiness(): Promise<{ ready: boolean; anvil: boolean; rpc: boolean }> {
+  const now = Date.now();
+  if (readyCache && now - readyCache.at < READY_CACHE_MS) return readyCache.result;
+  const anvil = anvilBinResolves();
+  const rpc = await anyRpcHealthy();
+  const result = { ready: anvil && rpc, anvil, rpc };
+  readyCache = { at: now, result };
+  return result;
 }
 
 const server = createServer(async (req, res) => {
   try {
     if (req.method === 'GET' && req.url?.startsWith('/health')) {
       return send(res, 200, { ok: true, service: 'honeypot-sandbox' });
+    }
+
+    if (req.method === 'GET' && req.url?.startsWith('/ready')) {
+      const r = await checkReadiness();
+      return send(res, r.ready ? 200 : 503, {
+        ready: r.ready,
+        checks: { anvilBin: r.anvil, upstreamRpc: r.rpc },
+      });
     }
 
     if (req.method === 'POST' && req.url?.startsWith('/scan')) {
@@ -189,6 +268,26 @@ async function shutdown(signal: string): Promise<void> {
   shuttingDown = true;
   console.log(`[server] ${signal} received — shutting down gracefully…`);
   server.close(() => console.log('[server] HTTP server closed'));
+
+  // REL-4: drain in-flight scans before tearing down forks, so a redeploy
+  // (SIGTERM) doesn't kill an anvil mid-transaction and produce a bogus verdict.
+  // Bounded grace: if a scan is genuinely stuck we still proceed (and its own
+  // SCAN_TIMEOUT_MS would have bounded it anyway).
+  const DRAIN_GRACE_MS = 10_000;
+  const DRAIN_POLL_MS = 200;
+  const drainDeadline = Date.now() + DRAIN_GRACE_MS;
+  if (activeScans > 0) {
+    console.log(`[server] waiting for ${activeScans} in-flight scan(s) to finish…`);
+    while (activeScans > 0 && Date.now() < drainDeadline) {
+      await new Promise((r) => setTimeout(r, DRAIN_POLL_MS));
+    }
+    if (activeScans > 0) {
+      console.warn(`[server] drain grace elapsed; ${activeScans} scan(s) still running — proceeding`);
+    } else {
+      console.log('[server] all in-flight scans drained');
+    }
+  }
+
   try {
     await stopAllForks();
   } catch (e) {

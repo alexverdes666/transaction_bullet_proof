@@ -30,16 +30,19 @@ export default function AdminUnlock() {
     <div className="min-h-screen flex items-center justify-center bg-neutral-950 text-neutral-100">
       <form onSubmit={submit} className="w-full max-w-sm space-y-4 p-8 rounded-xl border border-neutral-800 bg-neutral-900">
         <h1 className="text-lg font-semibold">Restricted</h1>
-        <p className="text-sm text-neutral-400">Enter the access key to continue.</p>
+        <label htmlFor="admin-key" className="text-sm text-neutral-400">Enter the access key to continue.</label>
         <input
+          id="admin-key"
+          name="key"
           type="password"
+          aria-label="Access key"
           value={key}
           onChange={(e) => setKey(e.target.value)}
           autoComplete="off"
           className="w-full rounded-md bg-neutral-800 border border-neutral-700 px-3 py-2 text-sm outline-none focus:border-neutral-500"
           placeholder="Access key"
         />
-        {error && <p className="text-sm text-red-400">{error}</p>}
+        {error && <p role="alert" className="text-sm text-red-400">{error}</p>}
         <button
           disabled={busy}
           className="w-full rounded-md bg-neutral-100 text-neutral-900 py-2 text-sm font-medium disabled:opacity-50"

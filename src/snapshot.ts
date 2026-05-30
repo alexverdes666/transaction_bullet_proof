@@ -17,13 +17,37 @@ export interface SnapshotInputs {
   label: string;
   /** Take a real EVM snapshot (so the fork can be reverted to here). */
   takeEvmSnapshot?: boolean;
+  /**
+   * PERF-1: a previously-discovered balance slot to reuse, so the (expensive)
+   * brute-force discovery only runs once per scan. The mapping base slot is an
+   * immutable property of the token contract, so the slot found for the BEFORE
+   * snapshot is valid for the AFTER snapshot too — pass it in to skip the second
+   * discovery pass entirely.
+   */
+  knownSlot?: { mappingSlot: bigint; storageKey: Hash } | null;
 }
 
 /**
  * Build a {@link StateSnapshot}: native ETH balance, token balance, plus the
  * raw storage slot backing the token balance (when discoverable).
  */
+export interface CaptureSnapshotResult {
+  snapshot: StateSnapshot;
+  /** The discovered (or reused) balance slot, so the caller can thread it into a
+   *  later snapshot and avoid re-running discovery (PERF-1). Null when no slot
+   *  could be confirmed (e.g. zero balance / proxy layout). */
+  slot: { mappingSlot: bigint; storageKey: Hash } | null;
+}
+
 export async function captureSnapshot(inputs: SnapshotInputs): Promise<StateSnapshot> {
+  return (await captureSnapshotEx(inputs)).snapshot;
+}
+
+/**
+ * Like {@link captureSnapshot} but also returns the discovered balance slot so
+ * the caller can reuse it for a subsequent snapshot (PERF-1).
+ */
+export async function captureSnapshotEx(inputs: SnapshotInputs): Promise<CaptureSnapshotResult> {
   const { fork, client, wallet, token, label } = inputs;
 
   const evmSnapshotId = inputs.takeEvmSnapshot ? await fork.snapshot() : null;
@@ -47,8 +71,13 @@ export async function captureSnapshot(inputs: SnapshotInputs): Promise<StateSnap
   if (trackWeth) balances.push({ token: weth, symbol: 'WETH', decimals: 18, raw: wethRaw });
 
   // Raw storage watch: the wallet's slot in the token's balance mapping.
+  // PERF-1: reuse a slot the caller already discovered (the mapping base slot is
+  // immutable), only brute-forcing it when none was supplied.
   const storage: StorageReading[] = [];
-  const slot = await findBalanceSlot(client, token, wallet).catch(() => null);
+  const slot =
+    inputs.knownSlot !== undefined
+      ? inputs.knownSlot
+      : await findBalanceSlot(client, token, wallet).catch(() => null);
   if (slot) {
     // getStorageAt can return undefined (slot never written). Default to the zero
     // hash rather than casting `undefined as Hash`, which would otherwise diff as
@@ -65,11 +94,14 @@ export async function captureSnapshot(inputs: SnapshotInputs): Promise<StateSnap
   }
 
   return {
-    label,
-    blockNumber: await client.getBlockNumber(),
-    evmSnapshotId,
-    balances,
-    storage,
-    takenAt: Date.now(),
+    snapshot: {
+      label,
+      blockNumber: await client.getBlockNumber(),
+      evmSnapshotId,
+      balances,
+      storage,
+      takenAt: Date.now(),
+    },
+    slot,
   };
 }

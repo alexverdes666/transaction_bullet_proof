@@ -7,6 +7,7 @@ import BuyClient from './BuyClient';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+export const metadata = { robots: { index: false, follow: false } };
 
 export default async function BuyPage() {
   const user = await getSessionUser();

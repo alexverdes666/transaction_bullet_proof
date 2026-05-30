@@ -36,15 +36,23 @@ export default function ScanForm({ initialCredits }: { initialCredits: number })
 
   async function scan(e: React.FormEvent) {
     e.preventDefault();
-    setBusy(true);
     setError('');
     setReport(null);
     setNoCredits(false);
 
+    // Client-side shape check: a token address is 0x + 40 hex chars. UX guard
+    // only — the server re-validates.
+    const trimmed = token.trim();
+    if (!/^0x[a-fA-F0-9]{40}$/.test(trimmed)) {
+      setError('Enter a valid token contract address (0x followed by 40 hex characters).');
+      return;
+    }
+
+    setBusy(true);
     const res = await fetch('/api/scan', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ token }),
+      body: JSON.stringify({ token: trimmed }),
     });
     const j = await res.json().catch(() => ({}));
     setBusy(false);
@@ -67,7 +75,11 @@ export default function ScanForm({ initialCredits }: { initialCredits: number })
   return (
     <div className="space-y-6">
       <form onSubmit={scan} className="space-y-3">
+        <label htmlFor="scan-token" className="sr-only">Token contract address</label>
         <input
+          id="scan-token"
+          name="token"
+          aria-label="Token contract address"
           value={token}
           onChange={(e) => setToken(e.target.value)}
           placeholder="0x… token contract address"
@@ -82,14 +94,14 @@ export default function ScanForm({ initialCredits }: { initialCredits: number })
       </form>
 
       {noCredits && (
-        <div className="rounded-lg border border-yellow-500/40 bg-yellow-500/10 p-4 text-sm">
+        <div role="status" aria-live="polite" className="rounded-lg border border-yellow-500/40 bg-yellow-500/10 p-4 text-sm">
           You&apos;re out of credits. <Link href="/buy" className="underline font-medium">Buy a pack</Link> to keep scanning.
         </div>
       )}
-      {error && <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-4 text-sm text-red-300">{error}</div>}
+      {error && <div role="alert" className="rounded-lg border border-red-500/40 bg-red-500/10 p-4 text-sm text-red-300">{error}</div>}
 
       {report && style && (
-        <div className={`rounded-xl border p-6 ${style.ring}`}>
+        <div role="status" aria-live="polite" className={`rounded-xl border p-6 ${style.ring}`}>
           <div className="flex items-center gap-3">
             <span className="text-3xl">{style.emoji}</span>
             <div>
@@ -130,7 +142,7 @@ function Metric({ label, value, good }: { label: string; value: string; good: bo
   return (
     <div className="rounded-lg bg-neutral-900/60 border border-neutral-800 py-3">
       <div className={`text-base font-semibold ${good ? 'text-emerald-400' : 'text-red-400'}`}>{value}</div>
-      <div className="text-neutral-500">{label}</div>
+      <div className="text-neutral-400">{label}</div>
     </div>
   );
 }

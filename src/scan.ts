@@ -14,7 +14,7 @@ import { AnvilFork } from './anvil.js';
 import { config } from './config.js';
 import { makePublicClient, makeWalletClient, testAccount } from './clients.js';
 import { fundWallet } from './wallet.js';
-import { captureSnapshot } from './snapshot.js';
+import { captureSnapshotEx } from './snapshot.js';
 import { simulateRoundTrip } from './honeypot.js';
 import { analyze, diffBalances, diffStorage } from './statediff.js';
 import type { HoneypotReport, RoundTripResult } from './types.js';
@@ -66,7 +66,7 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
     await fundWallet(fork, wallet);
 
     // b. Record the "before" snapshot (and a revertible EVM checkpoint).
-    const before = await captureSnapshot({
+    const beforeCap = await captureSnapshotEx({
       fork,
       client: publicClient,
       wallet,
@@ -74,6 +74,7 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
       label: 'before-interaction',
       takeEvmSnapshot: true,
     });
+    const before = beforeCap.snapshot;
 
     // c. Drive the deterministic on-chain buy/sell round-trip.
     const roundTrip: RoundTripResult = await simulateRoundTrip({
@@ -84,14 +85,22 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
       buyEth,
     });
 
-    // After-interaction snapshot.
-    const after = await captureSnapshot({
-      fork,
-      client: publicClient,
-      wallet,
-      token,
-      label: 'after-interaction',
-    });
+    // After-interaction snapshot. PERF-1: if the before-snapshot already located
+    // the balance slot (the wallet held the token pre-trade), reuse it so we skip
+    // a second brute-force discovery. The mapping base slot is immutable, so this
+    // is exact. When the before-snapshot found nothing (the usual case: balance
+    // was zero pre-buy, so the slot is undiscoverable then), we fall through to a
+    // fresh discovery here — preserving the original behaviour.
+    const after = (
+      await captureSnapshotEx({
+        fork,
+        client: publicClient,
+        wallet,
+        token,
+        label: 'after-interaction',
+        ...(beforeCap.slot ? { knownSlot: beforeCap.slot } : {}),
+      })
+    ).snapshot;
 
     // d. Strict state diff.
     const balanceDiff = diffBalances(before, after);

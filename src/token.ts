@@ -77,9 +77,19 @@ export async function findBalanceSlot(
   // the holder actually holds a non-zero, distinctive amount.
   if (actual === 0n) return null;
 
-  for (let slot = 0n; slot <= BigInt(maxSlot); slot++) {
-    const key = balanceSlotKey(holder, slot);
-    const raw = await client.getStorageAt({ address: token, slot: key });
+  // PERF-1: the candidate slots are independent reads against a *local* fork, so
+  // fire all of them at once instead of serially (was up to 31 round-trips in
+  // series). Pick the lowest-indexed slot whose raw value matches `balanceOf`,
+  // preserving the original first-match ordering / return contract.
+  const slots = Array.from({ length: maxSlot + 1 }, (_, i) => BigInt(i));
+  const reads = await Promise.all(
+    slots.map(async (slot) => {
+      const key = balanceSlotKey(holder, slot);
+      const raw = await client.getStorageAt({ address: token, slot: key });
+      return { slot, key, raw };
+    }),
+  );
+  for (const { slot, key, raw } of reads) {
     if (raw && BigInt(raw) === actual) {
       return { mappingSlot: slot, storageKey: key };
     }

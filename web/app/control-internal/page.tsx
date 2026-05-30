@@ -11,6 +11,7 @@ import AdminUnlock from './AdminUnlock';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+export const metadata = { robots: { index: false, follow: false } };
 
 function fmt(d: unknown): string {
   if (!d) return '—';
@@ -31,9 +32,23 @@ export default async function AdminPage() {
 
   const [users, scans, orders, logs, counts] = await Promise.all([
     User.find().sort({ createdAt: -1 }).limit(200).lean(),
-    Scan.find().sort({ createdAt: -1 }).limit(100).lean(),
-    Order.find().sort({ createdAt: -1 }).limit(100).lean(),
-    AuditLog.find().sort({ createdAt: -1 }).limit(200).lean(),
+    // Project only the rendered scalar columns — the full report/detail blobs are
+    // never shown here, so don't hydrate them.
+    Scan.find()
+      .select('createdAt userId token verdict riskScore')
+      .sort({ createdAt: -1 })
+      .limit(100)
+      .lean(),
+    Order.find()
+      .select('createdAt userId packId credits amount tokenSymbol status txHash')
+      .sort({ createdAt: -1 })
+      .limit(100)
+      .lean(),
+    AuditLog.find()
+      .select('createdAt type email ip fingerprint detail')
+      .sort({ createdAt: -1 })
+      .limit(200)
+      .lean(),
     Promise.all([
       User.countDocuments(),
       Scan.countDocuments(),
