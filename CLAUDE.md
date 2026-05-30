@@ -39,7 +39,7 @@ HONEYPOT) with plain-English reasons and a 0–100 risk score.
 
 ## 2. Architecture at a glance
 
-Three components. The engine cannot run on serverless (it spawns native `anvil`
+Two components. The engine cannot run on serverless (it spawns native `anvil`
 processes and runs live forks), which is why there's a separate worker.
 
 ```
@@ -52,7 +52,6 @@ Browser ─https─▶ Next.js web app (Vercel) ─https + X-Worker-Secret─▶
 |-----------|----------|------|------|
 | **Scan engine / worker** | `src/` (+ `Dockerfile.worker`) | Render | Forks mainnet, runs the buy→sell simulation, returns a JSON report. Internal-only; gated by a shared secret. |
 | **Web app** | `web/` (Next.js 16, React 19, App Router) | Vercel | The only public surface: landing, email+password auth, dashboard/scan UI, crypto checkout, hidden admin panel, all DB access. Calls the worker. |
-| **Python/Camoufox browser layer** | `python/` | (optional) | Anti-fingerprint headless browser that drives a dApp's Connect/Approve/**Buy** flow against the fork. **Tested & working** as a "browser deep-scan": the browser performs the buy (catching buy-side anti-bot/frontend tricks), then the engine verifies the **sell** on-chain (`simulateSellOnly`) → a complete browser-grounded verdict. Run via `npm run orchestrate -- <token>`. **Known limitation:** Camoufox's `add_init_script` does not reach the page's main JS world, so injecting a wallet into a *real arbitrary* dApp is unreliable — the bundled mock dApp works via a built-in fallback shim. Not wired into the paid SaaS (see §5/§10). |
 | **Database** | Mongoose models in `web/models/` | MongoDB Atlas | `users`, `sessions`, `orders`, `scans`, `auditlogs`, `ratelimits`. |
 
 ---
@@ -62,8 +61,6 @@ Browser ─https─▶ Next.js web app (Vercel) ─https + X-Worker-Secret─▶
 Entry points (root `package.json` scripts):
 - `npm run scan -- <tokenAddress>` — one-shot CLI scan (`src/index.ts`).
 - `npm run server` — the internal HTTP worker (`src/server.ts`): `GET /health`, `POST /scan`.
-- `npm run orchestrate -- <token>` — full Anvil↔Python↔diff flow (`src/orchestrator.ts`).
-- `npm run mock-dapp` — serves the bundled mock dApp.
 
 ### The round trip (`src/honeypot.ts`)
 On an isolated fork, as a fresh funded wallet:
@@ -75,9 +72,15 @@ On an isolated fork, as a fresh funded wallet:
 ### Verdict scoring (`src/statediff.ts`)
 Signals → anomaly codes → weighted risk score (0–100):
 - `SELL_REVERTED` (buyable, sell reverts) — the defining honeypot, +90.
-- `ZERO_TOKENS` (buy yields nothing), `HIGH_SELL_TAX` (≥50%), `ELEVATED_SELL_TAX` (≥10%),
-  `HIGH_BUY_TAX`, `TAX_ASYMMETRY`, `ROUNDTRIP_LOSS`, `NO_LIQUIDITY`, `STORAGE_DELTA`.
+- `ZERO_TOKENS` (buy yields nothing), `HIGH_SELL_TAX` (≥40% — this weight alone clears the
+  HONEYPOT line), `ELEVATED_SELL_TAX` (≥10% and <40% — SUSPICIOUS), `HIGH_BUY_TAX`,
+  `TAX_ASYMMETRY`, `ROUNDTRIP_LOSS`, `NO_LIQUIDITY`, `STORAGE_DELTA`.
 - Verdict: **<30 SAFE, 30–69 SUSPICIOUS, ≥70 HONEYPOT**; `ERROR` if it couldn't run.
+- A token that can't even be **bought** (no V2 pair / V3-only) is reported `ERROR`
+  (inconclusive) — **never `SAFE`** — because sellability was never actually tested.
+- **Known limitation:** the round trip is single-pass / single-wallet at one forked block,
+  so runtime-gated traps (per-address cooldowns, blacklists, sell-count limits, a trading
+  toggle) can evade it. The guarantee covers static taxes and hard sell-blocks.
 
 Key source files: `src/anvil.ts` (fork lifecycle), `src/scan.ts` (pipeline →
 `HoneypotReport`), `src/snapshot.ts` + `src/statediff.ts` (state diff), `src/report.ts`
@@ -147,7 +150,9 @@ These were discovered the hard way; don't regress them.
 2. **Windows anvil process hygiene.** Spawn anvil **without a shell** and kill it with
    `taskkill /T` (whole tree); a shell wrapper orphaned `anvil.exe` on the port and the next run
    silently reused stale forked state → nondeterministic wrong verdicts. `AnvilFork.start()` also
-   refuses to run if the port is already answering. See `src/anvil.ts`.
+   refuses to run if the port is already answering. Each fork now binds a **free ephemeral port**
+   (not a fixed one), so the worker can serve **concurrent** scans, each isolated on its own
+   process/port/state; viem clients are built per-fork from `fork.endpoint`. See `src/anvil.ts`.
 3. **Flaky free RPCs cause false positives.** anvil lazily fetches fork state, so a dropped
    upstream request mid-tx can look like a revert → false HONEYPOT. Mitigations: anvil
    `--retries/--timeout/--fork-retry-backoff`, upstream health-probe before forking, comma-separated
@@ -159,13 +164,6 @@ These were discovered the hard way; don't regress them.
    tsc checks; use `BigInt(5)`. Runtime/SWC handles bigint fine; this is only a type-check thing.
 6. **Secrets never get committed.** Engine config in root `.env`; web secrets in `web/.env.local`.
    Both are gitignored. Always `git diff --cached --name-only | grep env` before committing.
-7. **Browser automation must signal via the DOM, not `window` globals.** In Camoufox/Firefox the
-   page's own scripts run in a different JS world from Playwright's `page.evaluate`; only the DOM is
-   shared. The mock dApp signals via `data-bp-*` attributes on `<html>` and the Python driver reads
-   those (`python/browser_service.py`, `src/web/mock-dapp.html`). Relatedly, `add_init_script` runs
-   in an isolated world here and does **not** install `window.ethereum` into the page main world —
-   real-dApp wallet injection needs a different mechanism (e.g. a real wallet extension via a
-   persistent context). This is the main open limitation of the browser layer.
 
 ---
 
@@ -201,7 +199,7 @@ No local Mongo? `web/scripts/mem-mongo.mjs` starts an in-memory MongoDB for dev.
 
 ## 8. Testing — see `TESTING.md`
 
-- **Engine units:** `npm test` (node:test + tsx, 19 tests).
+- **Engine units:** `npm test` (node:test + tsx, 23 tests).
 - **Web units:** `cd web && npm test` (vitest, 15 tests; `server-only` aliased to a stub).
 - **End-to-end workflow:** start the worker + `cd web && npm run build && npm start`, then
   `cd web && npm run test:workflow` (33 assertions: auth, paywall, payments, live scan, admin,
@@ -226,15 +224,8 @@ All three layers pass against real MongoDB Atlas + a live worker.
 
 - **Done & tested:** scan engine, worker, web app (auth, paywall, crypto payments, admin, tracking),
   full test suite, deployment artifacts.
-- **Tested & working (CLI only):** the Python/Camoufox browser deep-scan (browser buy + on-chain
-  sell verification → `npm run orchestrate -- <token>`). Verified SAFE on mainnet USDC. **Not yet
-  wired into the SaaS** because: (a) against the bundled mock dApp it does the same Uniswap buy the
-  deterministic engine already does (no extra detection value for plain token scans), and (b) its
-  unique value — testing real dApp frontends / anti-bot walls — is blocked by the Camoufox
-  main-world wallet-injection limitation (§5.7). Decision pending: solve real-dApp injection (real
-  wallet extension via persistent context) to make it a premium "deep scan", or keep it experimental.
-- **Not built yet (candidates):** real-dApp wallet injection for the browser layer; admin actions
-  (ban / grant credits / revoke sessions); email verification; password reset; deploy walkthrough.
+- **Not built yet (candidates):** admin actions (ban / grant credits / revoke sessions); email
+  verification; password reset; deploy walkthrough.
 - **Git:** committed locally; the push to `github.com/xgaming6285/transaction_bullet_proof` is
   pending the owner's interactive GitHub login (the dev machine's cached credential is a different
   account, and the repo may need creating).
@@ -244,5 +235,5 @@ Other docs: `README.md` (engine), `ABOUT.md` (non-technical marketing explainer)
 
 ## 11. Environment notes
 - Dev machine: **Windows** (PowerShell + Git Bash). Use full paths; mind the anvil process-hygiene
-  notes above. Node 22, Python 3.13, Foundry 1.7.x.
+  notes above. Node 22, Foundry 1.7.x.
 - Engine is ESM with `.js` import specifiers (NodeNext); web uses bundler resolution (extensionless).

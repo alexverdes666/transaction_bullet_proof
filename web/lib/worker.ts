@@ -38,7 +38,19 @@ export async function runScanOnWorker(token: string): Promise<HoneypotReport> {
       const text = await res.text().catch(() => '');
       throw new Error(`worker responded ${res.status}: ${text.slice(0, 200)}`);
     }
-    return (await res.json()) as HoneypotReport;
+    // Validate at the trust boundary: the web app stores and surfaces this
+    // verbatim, so a malformed report must fail fast, not propagate downstream.
+    const data = (await res.json()) as HoneypotReport;
+    const VALID_VERDICTS = ['SAFE', 'SUSPICIOUS', 'HONEYPOT', 'ERROR'];
+    if (
+      !data ||
+      typeof data !== 'object' ||
+      !VALID_VERDICTS.includes(data.verdict) ||
+      typeof data.riskScore !== 'number'
+    ) {
+      throw new Error('worker returned a malformed report');
+    }
+    return data;
   } finally {
     clearTimeout(timeout);
   }

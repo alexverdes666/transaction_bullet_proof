@@ -74,7 +74,7 @@ secretly costs you 90% of your money"* — the kind of thing scammers work hard 
 ### The bottom line
 
 In crypto, the most expensive lesson is learning *after* you've lost the money.
-**Bullet Proof lets you learn first — safely, in seconds, for free.**
+**Bullet Proof lets you learn first — safely, in seconds.**
 
 ---
 

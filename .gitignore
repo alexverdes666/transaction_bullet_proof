@@ -7,15 +7,6 @@ dist/
 .env
 .env.local
 
-# Python
-python/.venv/
-__pycache__/
-*.pyc
-
-# Camoufox cache / fingerprint profiles
-python/camoufox-profile/
-.cache/
-
 # Generated reports
 reports/*.json
 !reports/.gitkeep

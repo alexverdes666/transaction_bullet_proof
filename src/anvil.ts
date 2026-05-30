@@ -8,9 +8,24 @@
  * never contaminate the next scan.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
+import { createServer as createNetServer } from 'node:net';
 import { createPublicClient, http, type Hash, type PublicClient } from 'viem';
-import { config, rpcUrl } from './config.js';
+import { config } from './config.js';
 import { sleep } from './util.js';
+
+/** Ask the OS for a free TCP port on loopback (port 0 = ephemeral). */
+function findFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createNetServer();
+    srv.unref();
+    srv.on('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const addr = srv.address();
+      const port = addr && typeof addr === 'object' ? addr.port : 0;
+      srv.close(() => (port ? resolve(port) : reject(new Error('could not allocate a free port'))));
+    });
+  });
+}
 
 export interface AnvilStartOptions {
   /** Override the upstream fork URL. */
@@ -54,12 +69,24 @@ async function pickHealthyRpc(candidates: string[], timeoutMs = 5000): Promise<s
 
 export class AnvilFork {
   private proc: ChildProcess | null = null;
-  private readonly url = rpcUrl();
+  private readonly requestedPort?: number;
+  private port: number;
+  private url: string;
   public client: PublicClient;
 
-  constructor() {
-    // A plain HTTP transport pointed at the local fork. Recreated lazily once
-    // the process is up, but we initialise here so `.client` is always defined.
+  /**
+   * @param opts.port  Bind to this specific port. Omit (the default) to grab a
+   *   free ephemeral port at {@link start} time, so multiple forks can run
+   *   concurrently without colliding — this is what lets the worker serve
+   *   parallel scans, each on its own port/process/state.
+   */
+  constructor(opts: { port?: number } = {}) {
+    this.requestedPort = opts.port;
+    this.port = opts.port ?? config.fork.anvilPort;
+    this.url = `http://127.0.0.1:${this.port}`;
+    // A plain HTTP transport pointed at the local fork. Recreated once the
+    // process is up (and once the ephemeral port is known), but initialised here
+    // so `.client` is always defined.
     this.client = createPublicClient({ transport: http(this.url) });
   }
 
@@ -67,12 +94,19 @@ export class AnvilFork {
   async start(opts: AnvilStartOptions = {}): Promise<void> {
     if (this.proc) throw new Error('AnvilFork already started');
 
+    // Allocate a free ephemeral port unless an explicit one was requested.
+    if (this.requestedPort === undefined) {
+      this.port = await findFreePort();
+      this.url = `http://127.0.0.1:${this.port}`;
+      this.client = createPublicClient({ transport: http(this.url) });
+    }
+
     // Guard: never silently reconnect to a stray process squatting on our port.
     // (A classic Windows footgun: an orphaned anvil keeps the port and the next
     //  run unknowingly talks to its stale, mutated state.)
     if (await this.portIsAnswering()) {
       throw new Error(
-        `[anvil] port ${config.fork.anvilPort} is already serving JSON-RPC. ` +
+        `[anvil] port ${this.port} is already serving JSON-RPC. ` +
           `A previous fork was likely not shut down. Free it (e.g. taskkill /IM anvil.exe /F) and retry.`,
       );
     }
@@ -90,7 +124,7 @@ export class AnvilFork {
 
     const args = [
       '--fork-url', forkUrl,
-      '--port', String(config.fork.anvilPort),
+      '--port', String(this.port),
       '--chain-id', String(config.fork.chainId),
       // Resilience against flaky free RPCs: anvil fetches fork state lazily, so a
       // single dropped upstream request mid-transaction can otherwise surface as

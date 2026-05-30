@@ -6,10 +6,13 @@ import { Schema, model, models, type InferSchemaType, type Model } from 'mongoos
  * the client only chooses a packId. Payment is settled by matching an on-chain
  * transfer to (treasury, token, exact amount) after `createdAt`, with a unique
  * txHash so a single payment can never settle two orders (replay protection).
+ * `creditsGranted` is the idempotency guard: credits are added exactly once, in
+ * the same transaction that flips this flag (see lib/payments.grantCreditsOnce).
  */
 const orderSchema = new Schema({
-  userId: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-  reference: { type: String, required: true, unique: true, index: true },
+  userId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  // `unique: true` already builds the index — no separate `index: true`.
+  reference: { type: String, required: true, unique: true },
   packId: { type: String, required: true },
   credits: { type: Number, required: true },
 
@@ -32,6 +35,8 @@ const orderSchema = new Schema({
   },
   // The settling transaction. Unique (sparse) => one tx settles at most one order.
   txHash: { type: String, default: null },
+  // Set true exactly once, atomically with the credit grant.
+  creditsGranted: { type: Boolean, default: false },
 
   createdAt: { type: Date, default: Date.now },
   expiresAt: { type: Date, required: true },
@@ -40,6 +45,10 @@ const orderSchema = new Schema({
 
 // One on-chain tx can settle only one order.
 orderSchema.index({ txHash: 1 }, { unique: true, sparse: true });
+// User's own order history, newest first (also covers userId lookups).
+orderSchema.index({ userId: 1, createdAt: -1 });
+// Admin "recent orders across all users".
+orderSchema.index({ createdAt: -1 });
 
 export type OrderDoc = InferSchemaType<typeof orderSchema> & {
   _id: import('mongoose').Types.ObjectId;

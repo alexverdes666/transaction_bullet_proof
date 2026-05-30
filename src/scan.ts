@@ -3,47 +3,32 @@
  * target token and returns a fully-formed {@link HoneypotReport}.
  *
  * Flow:
- *   start fork -> fund wallet -> snapshot(before) -> [interaction] ->
+ *   start fork -> fund wallet -> snapshot(before) -> buy/sell round-trip ->
  *   snapshot(after) -> state diff -> analyze -> report
  *
- * Two interaction modes:
- *   - 'simulate' (default): the deterministic on-chain buy/sell round-trip. No
- *      browser required; this is the bulletproof core.
- *   - 'external': skip the built-in swap and instead wait for an outside actor
- *      (the Python/Camoufox layer driving a dApp frontend) to push transactions
- *      to the fork. The diff still runs over whatever state changed.
+ * The interaction is the deterministic on-chain buy/sell round-trip — the
+ * bulletproof core. No browser required.
  */
-import { type Address, getAddress, parseEther } from 'viem';
+import { getAddress } from 'viem';
 import { AnvilFork } from './anvil.js';
 import { config } from './config.js';
 import { makePublicClient, makeWalletClient, testAccount } from './clients.js';
 import { fundWallet } from './wallet.js';
 import { captureSnapshot } from './snapshot.js';
-import { simulateRoundTrip, simulateSellOnly } from './honeypot.js';
+import { simulateRoundTrip } from './honeypot.js';
 import { analyze, diffBalances, diffStorage } from './statediff.js';
 import type { HoneypotReport, RoundTripResult } from './types.js';
 
 export interface ScanOptions {
   token: string;
   buyEth?: number;
-  mode?: 'simulate' | 'external';
-  /** For 'external' mode: async fn that performs the off-engine interaction
-   *  (e.g. spawn Camoufox) and resolves once transactions are mined. */
-  externalInteraction?: (ctx: ExternalContext) => Promise<void>;
   /** Reuse an already-running fork instead of spawning a new one. */
   fork?: AnvilFork;
-}
-
-export interface ExternalContext {
-  rpcUrl: string;
-  wallet: Address;
-  token: Address;
 }
 
 export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
   const started = Date.now();
   const token = getAddress(opts.token);
-  const mode = opts.mode ?? 'simulate';
   const buyEth = opts.buyEth ?? config.wallet.buyEth;
 
   const ownsFork = !opts.fork;
@@ -51,14 +36,14 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
   if (ownsFork) await fork.start({ quiet: true });
 
   try {
-    const publicClient = makePublicClient();
-    const walletClient = makeWalletClient();
+    const publicClient = makePublicClient(fork.endpoint);
+    const walletClient = makeWalletClient(fork.endpoint);
     const wallet = testAccount.address;
 
     // a. Fund the mock retail wallet with local ETH.
     await fundWallet(fork, wallet);
 
-    // c. Record the "before" snapshot (and a revertible EVM checkpoint).
+    // b. Record the "before" snapshot (and a revertible EVM checkpoint).
     const before = await captureSnapshot({
       fork,
       client: publicClient,
@@ -68,26 +53,14 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
       takeEvmSnapshot: true,
     });
 
-    // d. Drive the interaction.
-    let roundTrip: RoundTripResult | null = null;
-    if (mode === 'simulate') {
-      roundTrip = await simulateRoundTrip({ publicClient, walletClient, wallet, token, buyEth });
-    } else {
-      if (!opts.externalInteraction) {
-        throw new Error("mode 'external' requires an externalInteraction callback");
-      }
-      // The browser layer drives a real wallet to BUY the token through a dApp.
-      await opts.externalInteraction({ rpcUrl: fork.endpoint, wallet, token });
-      // Then we verify the other half on-chain: are the browser-acquired tokens
-      // sellable? This yields a complete, browser-grounded honeypot verdict.
-      roundTrip = await simulateSellOnly({
-        publicClient,
-        walletClient,
-        wallet,
-        token,
-        ethSpent: parseEther(String(buyEth)),
-      });
-    }
+    // c. Drive the deterministic on-chain buy/sell round-trip.
+    const roundTrip: RoundTripResult = await simulateRoundTrip({
+      publicClient,
+      walletClient,
+      wallet,
+      token,
+      buyEth,
+    });
 
     // After-interaction snapshot.
     const after = await captureSnapshot({
@@ -98,7 +71,7 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
       label: 'after-interaction',
     });
 
-    // e. Strict state diff.
+    // d. Strict state diff.
     const balanceDiff = diffBalances(before, after);
     const storageDiff = diffStorage(before, after);
     const { anomalies, riskScore, verdict } = analyze(roundTrip, storageDiff);

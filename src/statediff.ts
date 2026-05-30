@@ -23,7 +23,7 @@
  *   TAX_ASYMMETRY   Sell tax >> buy tax: the contract is cheap to enter, punishing
  *                   to exit. Classic "you can check in but never leave" design.
  *   ROUNDTRIP_LOSS  End-to-end you recovered far less ETH than you put in.
- *   STORAGE_GHOST   The wallet's token balance storage slot changed in a way the
+ *   STORAGE_DELTA   The wallet's token balance storage slot changed in a way the
  *                   ERC-20 balance read does not corroborate (silent rebasing).
  */
 import type { Address, Hash } from 'viem';
@@ -36,8 +36,8 @@ import type {
 } from './types.js';
 
 /** Thresholds (fractions) above which a tax is considered abusive. */
-const SELL_TAX_WARN = 0.1; // 10%
-const SELL_TAX_CRIT = 0.5; // 50%
+const SELL_TAX_WARN = 0.1; // 10%: elevated tax — SUSPICIOUS (yellow)
+const SELL_TAX_HONEYPOT = 0.4; // 40%: a sell tax this high is a trap by itself — HONEYPOT (red)
 const BUY_TAX_WARN = 0.1;
 const ROUNDTRIP_LOSS_WARN = 0.15; // 15% total slippage+tax is suspicious
 const ROUNDTRIP_LOSS_CRIT = 0.6;
@@ -124,9 +124,12 @@ export function analyze(
       severity: 'warning',
       code: 'NO_LIQUIDITY',
       message:
-        'Token could not be bought on the configured router (no V2 pair / no liquidity / non-standard routing).',
+        'Token could not be bought on the configured router (no V2 pair / no liquidity / non-standard routing). Sellability could not be assessed.',
     });
-    score += 20;
+    // We never completed a buy, so we have NOT actually tested whether this token
+    // can be sold. Reporting SAFE here would be a dangerous false negative — the
+    // verdict is INCONCLUSIVE (ERROR), i.e. "couldn't assess", never "safe".
+    return { anomalies, riskScore: 0, verdict: 'ERROR' };
   }
 
   if (rt.canBuy && rt.tokensReceived === 0n) {
@@ -158,20 +161,22 @@ export function analyze(
   }
 
   if (rt.canSell && rt.sellTax >= 0) {
-    if (rt.sellTax >= SELL_TAX_CRIT) {
+    if (rt.sellTax >= SELL_TAX_HONEYPOT) {
       anomalies.push({
         severity: 'critical',
         code: 'HIGH_SELL_TAX',
         message: `Effective sell tax ~${pct(rt.sellTax)} — exiting the position destroys most of its value.`,
       });
-      score += 60;
+      // A sell tax this steep is a trap on its own: this weight alone crosses the
+      // 70-point HONEYPOT line, so a ~40%+ sell tax is always flagged red.
+      score += 75;
     } else if (rt.sellTax >= SELL_TAX_WARN) {
       anomalies.push({
         severity: 'warning',
         code: 'ELEVATED_SELL_TAX',
-        message: `Effective sell tax ~${pct(rt.sellTax)} — above the ${pct(SELL_TAX_WARN)} comfort threshold.`,
+        message: `Effective sell tax ~${pct(rt.sellTax)} — above the ${pct(SELL_TAX_WARN)} comfort threshold but below the ${pct(SELL_TAX_HONEYPOT)} honeypot line.`,
       });
-      // A double-digit sell tax alone is enough to warrant a SUSPICIOUS verdict.
+      // A double-digit (but sub-honeypot) sell tax warrants a SUSPICIOUS verdict.
       score += 30;
     }
   }

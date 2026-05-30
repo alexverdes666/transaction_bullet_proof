@@ -29,11 +29,11 @@ The resulting signals map to scored anomalies:
 |------|---------|
 | `SELL_REVERTED` | Buyable but the sell reverts — the defining honeypot behaviour. |
 | `ZERO_TOKENS` | Buy "succeeds" but no tokens arrive (≈100% fee-on-transfer). |
-| `HIGH_SELL_TAX` / `ELEVATED_SELL_TAX` | Sell returns far less than the honest quote. |
+| `HIGH_SELL_TAX` / `ELEVATED_SELL_TAX` | Sell returns far less than the honest quote. A sell tax ≥40% alone is a HONEYPOT; 10–39% is SUSPICIOUS. |
 | `HIGH_BUY_TAX` | Tokens received well below the honest quote. |
 | `TAX_ASYMMETRY` | Sell tax ≫ buy tax — cheap to enter, punishing to exit. |
 | `ROUNDTRIP_LOSS` | End-to-end you recover far less ETH than you put in. |
-| `NO_LIQUIDITY` | Not routable on the configured DEX (no V2 pair / non-standard routing). |
+| `NO_LIQUIDITY` | Not routable on the configured DEX (no V2 pair / V3-only / non-standard routing). Reported as `ERROR` (inconclusive) — never SAFE, since sellability can't be tested. |
 | `STORAGE_DELTA` | A watched raw storage slot changed (cross-checked vs ERC-20 balance). |
 
 A weighted risk score (0–100) yields the verdict: **SAFE** (<30), **SUSPICIOUS** (30–69),
@@ -50,28 +50,24 @@ the single most important correctness fix in the engine.
 
 ## Architecture
 
-A split design using the best tool for each job:
+A single Node.js / TypeScript pipeline around a spawned `anvil` fork:
 
 ```
-                 ┌─────────────────────────── Node.js / TypeScript core ───────────────────────────┐
-[Start Anvil] ─▶ [Fund wallet] ─▶ [Snapshot BEFORE] ─▶ ┌─ simulate: on-chain buy→sell ──┐ ─▶ [Snapshot AFTER]
-   fork                                                 └─ external: Camoufox drives dApp ┘            │
-                                                                                                       ▼
-                                                                                  [State diff + anomaly scoring]
-                                                                                                       │
-                                                                                                       ▼
-                                                                                       [Clean JSON + terminal report]
+        ┌─────────────────────── Node.js / TypeScript core ───────────────────────┐
+[Start Anvil] ─▶ [Fund wallet] ─▶ [Snapshot BEFORE] ─▶ [on-chain buy→sell] ─▶ [Snapshot AFTER]
+   fork                                                                          │
+                                                                                 ▼
+                                                                [State diff + anomaly scoring]
+                                                                                 │
+                                                                                 ▼
+                                                                 [Clean JSON + terminal report]
 ```
 
 - **Node.js / TypeScript** (`src/`) — forking, EVM state snapshot/diff, transaction execution
   via [`viem`](https://viem.sh) against a spawned `anvil` child process. This is the
   deterministic, bulletproof core.
-- **Python / Camoufox** (`python/`) — anti-fingerprinting headless browser that mimics a
-  realistic retail user, injects a mock EIP-1193 wallet provider connected to the fork, and
-  drives a dApp's *Approve → Swap* workflow. Used to exercise real dApp **frontends** (and
-  their anti-bot walls); the on-chain engine remains the authoritative detector.
-- **Orchestration** (`src/orchestrator.ts`, `src/server.ts`) — binds the phases together and
-  exposes an HTTP/IPC control API.
+- **Control API** (`src/server.ts`) — exposes the pipeline over a tiny HTTP/IPC layer so other
+  processes (CI, a dashboard, the web app) can request scans.
 
 ### Project layout
 ```
@@ -88,14 +84,7 @@ src/
   scan.ts            high-level pipeline → HoneypotReport
   report.ts          terminal rendering + JSON persistence
   index.ts           CLI entrypoint (one-shot scan)
-  orchestrator.ts    master Anvil ↔ Python ↔ diff flow
   server.ts          HTTP control / IPC API
-  mockDappServer.ts  serves the bundled mock dApp
-  web/mock-dapp.html self-contained mock swap UI (no CDN, works with or without injection)
-python/
-  browser_service.py Camoufox automation
-  eip1193_provider.js injected mock wallet provider
-  requirements.txt
 ```
 
 ---
@@ -112,11 +101,6 @@ python/
 - **A mainnet RPC URL.** Free public endpoints work but are flaky — list several
   comma-separated for automatic failover, or use a dedicated Alchemy/Infura key for reliable
   results.
-- **Python ≥ 3.10 + Camoufox** (only for the browser-driven path):
-  ```bash
-  pip install -r python/requirements.txt
-  python -m camoufox fetch
-  ```
 
 ## Setup
 ```bash
@@ -134,23 +118,11 @@ npm run scan -- 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48
 ```
 Exit codes: `0` SAFE/SUSPICIOUS · `1` HONEYPOT · `3` ERROR — usable as a CI gate.
 
-**Full orchestration (drives the bundled mock dApp via Camoufox):**
-```bash
-npm run orchestrate -- <tokenAddress>            # serves + drives the local mock dApp
-npm run orchestrate -- <tokenAddress> --url <dappUrl>   # point at a real dApp frontend
-npm run orchestrate -- <tokenAddress> --simulate        # skip the browser, engine only
-```
-
 **HTTP control API:**
 ```bash
 npm run server
 curl -X POST http://127.0.0.1:8645/scan -H 'content-type: application/json' \
   -d '{"token":"0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48","buyEth":1}'
-```
-
-**Standalone mock dApp** (for manual inspection):
-```bash
-npm run mock-dapp   # then open the printed URL with ?rpc=&account=&router=&weth=&token=
 ```
 
 Reports are written to `reports/<token>_<timestamp>.json`.
@@ -176,4 +148,6 @@ Reports are written to `reports/<token>_<timestamp>.json`.
   other V2 forks).
 - A SAFE verdict reflects behaviour **at the forked block** with the configured trade size;
   it is not a guarantee of future behaviour (taxes/blacklists can be toggled by an admin).
+- The simulation is **single-pass / single-wallet** at one block, so honeypots that gate
+  sells by per-address cooldown, blacklist, sell-count or a trading toggle can evade it.
 - This is an analysis aid, not financial advice. Always do your own research.

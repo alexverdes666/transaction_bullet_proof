@@ -4,6 +4,7 @@
  * and the receiving treasury are decided here and confirmed against the chain.
  */
 import 'server-only';
+import mongoose from 'mongoose';
 import { randomBytes, randomInt } from 'node:crypto';
 import { createPublicClient, http, parseAbiItem, getAddress, type Address } from 'viem';
 import { connectDb } from './db';
@@ -94,7 +95,12 @@ export async function verifyOrder(orderId: string): Promise<VerifyResult> {
   await connectDb();
   const order = await Order.findById(orderId);
   if (!order) throw new Error('Order not found');
-  if (order.status === 'paid') return { status: 'paid', txHash: order.txHash ?? undefined };
+  if (order.status === 'paid') {
+    // Idempotent safety net: if a prior settle flipped status but crashed before
+    // crediting (or pre-dates the creditsGranted guard), finish the grant now.
+    await grantCreditsOnce(order._id, order.userId, order.credits);
+    return { status: 'paid', txHash: order.txHash ?? undefined, creditsGranted: order.credits };
+  }
 
   if (order.expiresAt.getTime() < Date.now()) {
     await Order.updateOne({ _id: order._id, status: 'pending' }, { $set: { status: 'expired' } });
@@ -125,8 +131,13 @@ export async function verifyOrder(orderId: string): Promise<VerifyResult> {
         { $set: { status: 'paid', txHash, paidAt: new Date() } },
         { new: true },
       );
-      if (!settled) return { status: 'paid', txHash: order.txHash ?? undefined };
-      await User.updateOne({ _id: order.userId }, { $inc: { credits: order.credits } });
+      if (!settled) {
+        // Lost the settle race; make sure credits landed for the winner's order.
+        await grantCreditsOnce(order._id, order.userId, order.credits);
+        return { status: 'paid', txHash: order.txHash ?? undefined };
+      }
+      // Grant credits exactly once — atomically with the flag flip (see helper).
+      await grantCreditsOnce(settled._id, settled.userId, settled.credits);
       return { status: 'paid', txHash, creditsGranted: order.credits };
     } catch (e) {
       // Duplicate txHash => this transfer already settled another order. Keep looking.
@@ -139,4 +150,40 @@ export async function verifyOrder(orderId: string): Promise<VerifyResult> {
 
 function isDuplicateKey(e: unknown): boolean {
   return typeof e === 'object' && e !== null && (e as { code?: number }).code === 11000;
+}
+
+/**
+ * Grant an order's credits to its user EXACTLY once, crash-safely.
+ *
+ * The `creditsGranted` flag is the idempotency guard: only the call that flips it
+ * false->true performs the `$inc`. On a replica set / Atlas the flip and the
+ * increment commit in one transaction, so a crash can neither double-grant nor
+ * leave a paid order uncredited. On a standalone Mongo (no transactions) we fall
+ * back to the same guarded two-step, which is still safe against double-granting.
+ */
+async function grantCreditsOnce(orderId: unknown, userId: unknown, credits: number): Promise<void> {
+  const claim = { _id: orderId, status: 'paid', creditsGranted: { $ne: true } };
+  try {
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const claimed = await Order.findOneAndUpdate(
+          claim,
+          { $set: { creditsGranted: true } },
+          { new: true, session },
+        );
+        if (claimed) {
+          await User.updateOne({ _id: userId }, { $inc: { credits } }, { session });
+        }
+      });
+    } finally {
+      await session.endSession();
+    }
+  } catch {
+    // Standalone Mongo (transactions unsupported) or a transient transaction
+    // error: fall back to the guarded claim+grant. The $ne:true guard still
+    // prevents a double grant.
+    const claimed = await Order.findOneAndUpdate(claim, { $set: { creditsGranted: true } }, { new: true });
+    if (claimed) await User.updateOne({ _id: userId }, { $inc: { credits } });
+  }
 }

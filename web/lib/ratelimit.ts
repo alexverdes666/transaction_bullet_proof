@@ -28,12 +28,27 @@ export async function rateLimit(
   const expiresAt = new Date(windowStart.getTime() + windowSec * 1000);
   const bucketKey = `${key}:${windowStart.getTime()}`;
 
-  const doc = await RateLimit.findOneAndUpdate(
-    { key: bucketKey },
-    { $inc: { count: 1 }, $setOnInsert: { windowStart, expiresAt } },
-    { upsert: true, new: true },
-  );
+  let doc;
+  try {
+    doc = await RateLimit.findOneAndUpdate(
+      { key: bucketKey },
+      { $inc: { count: 1 }, $setOnInsert: { windowStart, expiresAt } },
+      { upsert: true, new: true },
+    );
+  } catch (e) {
+    // Unique-index race: two requests opened the same fresh window at once and
+    // both tried to insert. The bucket now exists, so retry as a plain increment.
+    if (isDuplicateKeyError(e)) {
+      doc = await RateLimit.findOneAndUpdate({ key: bucketKey }, { $inc: { count: 1 } }, { new: true });
+    } else {
+      throw e;
+    }
+  }
 
   const count = doc?.count ?? 1;
   return { ok: count <= limit, remaining: Math.max(0, limit - count) };
+}
+
+function isDuplicateKeyError(e: unknown): boolean {
+  return !!e && typeof e === 'object' && 'code' in e && (e as { code?: number }).code === 11000;
 }

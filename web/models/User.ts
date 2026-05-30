@@ -24,7 +24,8 @@ const ipSightingSchema = new Schema(
 );
 
 const userSchema = new Schema({
-  email: { type: String, required: true, unique: true, lowercase: true, trim: true, index: true },
+  // `unique: true` already builds a unique index — no separate `index: true`.
+  email: { type: String, required: true, unique: true, lowercase: true, trim: true },
   // scrypt: stored as `salt:hash` hex. Never plaintext.
   passwordHash: { type: String, required: true },
   role: { type: String, enum: ['user', 'admin'], default: 'user', index: true },
@@ -45,6 +46,8 @@ const userSchema = new Schema({
 
   createdAt: { type: Date, default: Date.now },
 });
+// Admin user listing is sorted newest-first.
+userSchema.index({ createdAt: -1 });
 
 export type UserDoc = InferSchemaType<typeof userSchema> & { _id: import('mongoose').Types.ObjectId };
 

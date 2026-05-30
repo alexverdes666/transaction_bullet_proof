@@ -1,8 +1,8 @@
 /**
  * HTTP control / IPC layer.
  *
- * A tiny zero-dependency JSON API so other processes (CI, a dashboard, or the
- * Python layer) can request scans without re-implementing the pipeline.
+ * A tiny zero-dependency JSON API so other processes (CI or a dashboard) can
+ * request scans without re-implementing the pipeline.
  *
  *   GET  /health              -> { ok: true }
  *   POST /scan { token, buyEth?, mode? }  -> HoneypotReport (JSON)
@@ -20,7 +20,7 @@ import { jsonSafe } from './util.js';
 // Shared secret gating /scan. Set in production (Render); when present it is
 // REQUIRED on every scan request so end users can never call the worker
 // directly to obtain free scans. Unset only for local CLI/dev convenience.
-const WORKER_SECRET = process.env.WORKER_SHARED_SECRET ?? '';
+const WORKER_SECRET = config.control.workerSecret;
 
 function send(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(jsonSafe(body));
@@ -59,14 +59,10 @@ const server = createServer(async (req, res) => {
       if (!isAddress(token)) {
         return send(res, 400, { error: 'invalid or missing "token" address' });
       }
-      const mode = body['mode'] === 'external' ? 'external' : 'simulate';
       const buyEth = body['buyEth'] !== undefined ? Number(body['buyEth']) : undefined;
 
-      console.log(`[server] scan request: ${token} (mode=${mode})`);
-      // Note: 'external' mode over HTTP has no browser callback wired in; it
-      // would simply diff a no-op interaction. The orchestrator is the entry
-      // point for the full browser-driven flow.
-      const report = await runScan({ token, mode: 'simulate', ...(buyEth !== undefined ? { buyEth } : {}) });
+      console.log(`[server] scan request: ${token}`);
+      const report = await runScan({ token, ...(buyEth !== undefined ? { buyEth } : {}) });
       return send(res, 200, report);
     }
 
@@ -77,8 +73,8 @@ const server = createServer(async (req, res) => {
 });
 
 // In a container (Render sets PORT) bind 0.0.0.0; locally stay on loopback.
-const PORT = process.env.PORT ? Number(process.env.PORT) : config.control.port;
-const HOST = process.env.PORT ? '0.0.0.0' : '127.0.0.1';
+const PORT = config.control.port;
+const HOST = config.control.host;
 
 server.listen(PORT, HOST, () => {
   console.log(`[server] honeypot control API listening on http://${HOST}:${PORT}`);

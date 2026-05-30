@@ -59,12 +59,12 @@ export const config = {
     buyEth: num('BUY_ETH', 1),
   },
   control: {
-    port: num('CONTROL_PORT', 8645),
-    mockDappPort: num('MOCK_DAPP_PORT', 8700),
-  },
-  python: {
-    bin: str('PYTHON_BIN', 'python'),
-    headless: str('HEADLESS', 'true') !== 'false',
+    // In a container (Render) PORT is injected; locally fall back to CONTROL_PORT.
+    port: num('PORT', num('CONTROL_PORT', 8645)),
+    // Bind public when containerised, loopback-only for local dev.
+    host: process.env.PORT ? '0.0.0.0' : '127.0.0.1',
+    // Shared secret gating POST /scan. Empty = dev mode (open). See src/server.ts.
+    workerSecret: str('WORKER_SHARED_SECRET', ''),
   },
 } as const;
 

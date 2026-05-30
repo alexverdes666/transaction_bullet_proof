@@ -3,11 +3,13 @@ import { Schema, model, models, type InferSchemaType, type Model } from 'mongoos
 
 /**
  * Server-side session record. The cookie holds an opaque random token; we store
- * only its SHA-256 hash, so a DB leak cannot be replayed as a live cookie.
+ * only a keyed HMAC of it (see lib/session), so a DB leak cannot be replayed as
+ * a live cookie. The TTL index on expiresAt auto-deletes expired sessions.
  */
 const sessionSchema = new Schema({
   userId: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-  tokenHash: { type: String, required: true, unique: true, index: true },
+  // `unique: true` already builds a unique index — no separate `index: true`.
+  tokenHash: { type: String, required: true, unique: true },
   ip: String,
   userAgent: String,
   createdAt: { type: Date, default: Date.now },

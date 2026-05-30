@@ -41,7 +41,7 @@ async function main(): Promise<void> {
     process.exit(2);
   }
 
-  const report = await runScan({ token: args.token, buyEth: args.buyEth, mode: 'simulate' });
+  const report = await runScan({ token: args.token, buyEth: args.buyEth });
 
   if (args.jsonOnly) {
     console.log(toJson(report));

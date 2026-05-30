@@ -56,9 +56,13 @@ test('buy delivers zero tokens => ZERO_TOKENS critical', () => {
   assert.equal(r.verdict, 'HONEYPOT');
 });
 
-test('not buyable => NO_LIQUIDITY warning', () => {
+test('not buyable => ERROR verdict (never SAFE for an un-assessable token)', () => {
+  // DOM-5: a token the engine could not even buy (no V2 liquidity / V3-only) must
+  // NOT be reported SAFE — sellability was never tested. Verdict is inconclusive.
   const r = analyze(rt({ canBuy: false, canSell: false, tokensReceived: 0n, sellTax: -1, roundTripLoss: -1 }), []);
   assert.ok(codes(r).includes('NO_LIQUIDITY'));
+  assert.notEqual(r.verdict, 'SAFE');
+  assert.equal(r.verdict, 'ERROR');
 });
 
 test('high sell tax flagged and scored as dangerous', () => {
@@ -72,6 +76,36 @@ test('moderate sell tax => SUSPICIOUS', () => {
   const r = analyze(rt({ sellTax: 0.12, roundTripLoss: 0.12 }), []);
   assert.ok(codes(r).includes('ELEVATED_SELL_TAX'));
   assert.equal(r.verdict, 'SUSPICIOUS');
+});
+
+// ---- DOM-1 sell-tax band calibration (lock the 40% honeypot line) -------
+test('sell tax 40% => HONEYPOT (at the honeypot line)', () => {
+  const r = analyze(rt({ sellTax: 0.4, buyTax: 0, roundTripLoss: 0.4, ethReceived: 6n * 10n ** 17n }), []);
+  assert.ok(codes(r).includes('HIGH_SELL_TAX'));
+  assert.equal(r.verdict, 'HONEYPOT');
+  assert.ok(r.riskScore >= 70);
+});
+
+test('sell tax 39% => SUSPICIOUS (just below the honeypot line)', () => {
+  const r = analyze(rt({ sellTax: 0.39, buyTax: 0, roundTripLoss: 0.39, ethReceived: 61n * 10n ** 16n }), []);
+  assert.ok(codes(r).includes('ELEVATED_SELL_TAX'));
+  assert.equal(r.verdict, 'SUSPICIOUS');
+  assert.ok(r.riskScore < 70);
+});
+
+test('sell tax >=50% stays HONEYPOT (unchanged behaviour)', () => {
+  const r = analyze(rt({ sellTax: 0.55, buyTax: 0, roundTripLoss: 0.55, ethReceived: 45n * 10n ** 16n }), []);
+  assert.equal(r.verdict, 'HONEYPOT');
+  assert.ok(r.riskScore >= 70);
+});
+
+test('a ~40% sell tax alone clears the 70-point line (HIGH_SELL_TAX weight)', () => {
+  // Isolate HIGH_SELL_TAX: buyTax 0.21 keeps asymmetry (0.19) below its 0.20 trigger,
+  // and roundTripLoss 0 removes that signal — so the sell-tax weight is what carries it.
+  const r = analyze(rt({ sellTax: 0.4, buyTax: 0.21, roundTripLoss: 0 }), []);
+  assert.ok(!codes(r).includes('TAX_ASYMMETRY'));
+  assert.equal(r.verdict, 'HONEYPOT');
+  assert.ok(r.riskScore >= 70);
 });
 
 // ---- diffBalances -------------------------------------------------------

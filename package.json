@@ -10,8 +10,6 @@
   "scripts": {
     "scan": "tsx src/index.ts",
     "server": "tsx src/server.ts",
-    "orchestrate": "tsx src/orchestrator.ts",
-    "mock-dapp": "tsx src/mockDappServer.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc",
     "test": "node --import tsx --test test/*.test.ts"

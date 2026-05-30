@@ -19,10 +19,18 @@ globalForMongoose._mongoose = cache;
 export async function connectDb(): Promise<typeof mongoose> {
   if (cache.conn) return cache.conn;
   if (!cache.promise) {
-    cache.promise = mongoose.connect(env.mongoUri, {
-      maxPoolSize: 10,
-      serverSelectionTimeoutMS: 10_000,
-    });
+    cache.promise = mongoose
+      .connect(env.mongoUri, {
+        maxPoolSize: 10,
+        serverSelectionTimeoutMS: 10_000,
+      })
+      .catch((e) => {
+        // Never cache a REJECTED promise: otherwise one transient Atlas blip
+        // wedges every later request until a redeploy. Clear it so the next
+        // call retries the connection.
+        cache.promise = null;
+        throw e;
+      });
   }
   cache.conn = await cache.promise;
   return cache.conn;

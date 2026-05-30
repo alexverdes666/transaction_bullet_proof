@@ -1,10 +1,11 @@
 /**
- * Session management: opaque random token in an httpOnly cookie, only its
- * SHA-256 hash persisted server-side. A DB leak therefore yields no usable
- * cookies, and the 256-bit token is unguessable.
+ * Session management: opaque random token in an httpOnly cookie, of which only a
+ * keyed HMAC-SHA256 (keyed by SESSION_SECRET) is persisted server-side. A DB
+ * leak therefore yields no usable cookies — an attacker would also need the
+ * server-held secret — and the 256-bit token is itself unguessable.
  */
 import 'server-only';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 import { cookies } from 'next/headers';
 import { connectDb } from './db';
 import { env } from './env';
@@ -14,8 +15,9 @@ import type { ReqContext } from './request';
 
 export const SESSION_COOKIE = 'bp_session';
 
+/** Keyed HMAC of the session token (SESSION_SECRET is the key). */
 function sha256(s: string): string {
-  return createHash('sha256').update(s).digest('hex');
+  return createHmac('sha256', env.sessionSecret).update(s).digest('hex');
 }
 
 export async function createSession(
