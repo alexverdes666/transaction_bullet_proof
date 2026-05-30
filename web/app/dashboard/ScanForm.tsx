@@ -1,8 +1,12 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+
+// Persist the last scan result so it survives `router.refresh()` remounts AND a
+// full browser refresh — it stays visible until the next scan replaces it.
+const LAST_SCAN_KEY = 'bp_last_scan';
 
 interface Report {
   verdict: 'SAFE' | 'SUSPICIOUS' | 'HONEYPOT' | 'ERROR';
@@ -31,8 +35,26 @@ export default function ScanForm({ initialCredits }: { initialCredits: number })
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [report, setReport] = useState<Report | null>(null);
+  const [scannedToken, setScannedToken] = useState('');
   const [credits, setCredits] = useState(initialCredits);
   const [noCredits, setNoCredits] = useState(false);
+
+  // Restore the last result on mount so it survives a router.refresh() remount
+  // or a full page refresh.
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(LAST_SCAN_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved) as { token: string; report: Report };
+        if (parsed?.report) {
+          setReport(parsed.report);
+          setScannedToken(parsed.token ?? '');
+        }
+      }
+    } catch {
+      // ignore malformed/blocked storage
+    }
+  }, []);
 
   async function scan(e: React.FormEvent) {
     e.preventDefault();
@@ -66,7 +88,13 @@ export default function ScanForm({ initialCredits }: { initialCredits: number })
       return;
     }
     setReport(j.report);
+    setScannedToken(trimmed);
     setCredits(j.creditsRemaining);
+    try {
+      localStorage.setItem(LAST_SCAN_KEY, JSON.stringify({ token: trimmed, report: j.report }));
+    } catch {
+      // ignore storage failures (private mode / quota) — result still shows in-session
+    }
     router.refresh();
   }
 
@@ -109,6 +137,9 @@ export default function ScanForm({ initialCredits }: { initialCredits: number })
               <div className="text-xs text-neutral-400">Risk score {report.riskScore}/100</div>
             </div>
           </div>
+          {scannedToken && (
+            <p className="mt-3 font-mono text-xs text-neutral-500 break-all">Result for {scannedToken}</p>
+          )}
           <p className="mt-4 text-sm text-neutral-300">{report.summary}</p>
 
           {report.roundTrip && (
