@@ -101,6 +101,8 @@ export interface VerifyResult {
  */
 export async function verifyOrder(orderId: string): Promise<VerifyResult> {
   await connectDb();
+  // Guard against a malformed id → Mongoose CastError. Treat as not-found.
+  if (!mongoose.isValidObjectId(orderId)) throw new Error('Order not found');
   const order = await Order.findById(orderId);
   if (!order) throw new Error('Order not found');
   if (order.status === 'paid') {
@@ -111,6 +113,16 @@ export async function verifyOrder(orderId: string): Promise<VerifyResult> {
   }
 
   const client = payClient();
+
+  // Assert the RPC is on the chain this order was priced/created for. A
+  // misconfigured endpoint (e.g. a testnet RPC) must never settle a mainnet
+  // order — bail rather than read Transfer logs from the wrong chain.
+  const rpcChainId = await client.getChainId();
+  if (rpcChainId !== order.chainId) {
+    console.error(`verifyOrder chain mismatch: RPC=${rpcChainId} order=${order.chainId}`);
+    return { status: 'pending' };
+  }
+
   const latest = await client.getBlockNumber();
   const maxConfirmedBlock = latest - BigInt(env.pay.minConfirmations);
   if (maxConfirmedBlock < BigInt(order.fromBlock)) return { status: 'pending' }; // nothing confirmed yet
@@ -135,6 +147,8 @@ export async function verifyOrder(orderId: string): Promise<VerifyResult> {
 
   const want = BigInt(order.amount);
   for (const log of logs) {
+    // Defence in depth: never honour a transfer mined before the order existed.
+    if (log.blockNumber < BigInt(order.fromBlock)) continue;
     if (log.args.value !== want) continue;
     const txHash = log.transactionHash;
     // Atomic settle: only the first caller flips pending→paid and grants credits.

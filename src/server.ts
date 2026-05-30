@@ -30,6 +30,10 @@ const MAX_BODY_BYTES = 16 * 1024;
 const MAX_CONCURRENT_SCANS = 3;
 /** Hard ceiling per scan; on timeout we still tear the fork down (see below). */
 const SCAN_TIMEOUT_MS = 90_000;
+/** SEC-9: clamp the optional per-request buy size. The SaaS never sends buyEth,
+ *  but the worker must be defensive: an unbounded value could try to fund/spend
+ *  an absurd amount on the fork. Accept only a finite number in (0, MAX_BUY_ETH]. */
+const MAX_BUY_ETH = 100;
 
 /** Thrown by readJson when a body exceeds MAX_BODY_BYTES. */
 class PayloadTooLargeError extends Error {}
@@ -130,7 +134,14 @@ const server = createServer(async (req, res) => {
       if (!isAddress(token)) {
         return send(res, 400, { error: 'invalid or missing "token" address' });
       }
-      const buyEth = body['buyEth'] !== undefined ? Number(body['buyEth']) : undefined;
+      // SEC-9: validate/clamp buyEth to a sane positive range; 400 otherwise.
+      let buyEth: number | undefined;
+      if (body['buyEth'] !== undefined) {
+        buyEth = Number(body['buyEth']);
+        if (!Number.isFinite(buyEth) || buyEth <= 0 || buyEth > MAX_BUY_ETH) {
+          return send(res, 400, { error: `"buyEth" must be a number in (0, ${MAX_BUY_ETH}]` });
+        }
+      }
 
       console.log(`[server] scan request: ${token}`);
       activeScans++;

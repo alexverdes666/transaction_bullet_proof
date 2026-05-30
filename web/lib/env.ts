@@ -30,6 +30,10 @@ function int(name: string, fallback: number, opts: IntOpts = {}): number {
   return n;
 }
 
+const isProd = process.env.NODE_ENV === 'production';
+
+const PAY_RPC_DEFAULT = 'https://ethereum-rpc.publicnode.com';
+
 export const env = {
   mongoUri: req('MONGODB_URI'),
 
@@ -51,7 +55,7 @@ export const env = {
 
   // Crypto payments: on-chain verification config.
   pay: {
-    rpcUrl: opt('PAY_RPC_URL', 'https://ethereum-rpc.publicnode.com'),
+    rpcUrl: opt('PAY_RPC_URL', PAY_RPC_DEFAULT),
     chainId: int('PAY_CHAIN_ID', 1, { min: 1 }),
     tokenAddress: opt('PAY_TOKEN_ADDRESS', '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'), // USDC
     tokenDecimals: int('PAY_TOKEN_DECIMALS', 6, { min: 0 }),
@@ -61,5 +65,28 @@ export const env = {
     orderTtlMinutes: int('PAY_ORDER_TTL_MINUTES', 60, { min: 1 }),
   },
 
-  isProd: process.env.NODE_ENV === 'production',
+  isProd,
 } as const;
+
+// --- Production fail-closed checks ------------------------------------------
+// In prod, certain security-critical settings must not silently fall back to a
+// weak/shared default — fail closed at runtime rather than running insecurely.
+//
+// IMPORTANT: `next build` always runs with NODE_ENV=production and evaluates
+// route modules (page-data collection), but the build host has no secrets. So
+// skip these checks during the build PHASE (NEXT_PHASE=phase-production-build);
+// they still fire when the real server boots (phase-production-server/undefined)
+// and on the worker process. This preserves fail-closed behavior in production
+// without breaking the build.
+const isBuildPhase = process.env.NEXT_PHASE === 'phase-production-build';
+if (env.isProd && !isBuildPhase) {
+  // SEC-7: payment verification must use a dedicated RPC, not the shared public
+  // default (rate-limited / untrusted → unreliable settlement).
+  if (!process.env.PAY_RPC_URL || env.pay.rpcUrl === PAY_RPC_DEFAULT) {
+    throw new Error('PAY_RPC_URL must be set to a dedicated RPC endpoint in production');
+  }
+  // CFG-6: the admin second factor (access key) must not be disabled in prod.
+  if (!env.adminAccessKey) {
+    throw new Error('ADMIN_ACCESS_KEY must be set in production');
+  }
+}

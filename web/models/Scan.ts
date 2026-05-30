@@ -11,8 +11,8 @@ const scanSchema = new Schema({
   // Full HoneypotReport JSON from the worker (bigints already stringified).
   report: { type: Schema.Types.Mixed },
   durationMs: Number,
-  ip: String,
-  fingerprint: String,
+  // NOTE: IP/fingerprint are intentionally NOT stored here (data minimization).
+  // The `scan` AuditLog event already records them and AuditLog has a TTL.
   createdAt: { type: Date, default: Date.now, index: true },
 });
 // Dashboard "recent scans": find by user, newest first (also covers userId lookups).

@@ -164,6 +164,32 @@ These were discovered the hard way; don't regress them.
    tsc checks; use `BigInt(5)`. Runtime/SWC handles bigint fine; this is only a type-check thing.
 6. **Secrets never get committed.** Engine config in root `.env`; web secrets in `web/.env.local`.
    Both are gitignored. Always `git diff --cached --name-only | grep env` before committing.
+7. **Worker fails CLOSED in production (CFG-3).** The `/scan` worker runs **open** when
+   `WORKER_SHARED_SECRET` is empty — fine for local dev, but in a deployment that silently
+   exposes the engine and **bypasses the SaaS paywall**. The worker now refuses to boot if it
+   looks deployed (`process.env.PORT` set — Render/most PaaS inject it — or
+   `NODE_ENV==='production'`) and the secret is missing/empty. Local dev (no `PORT`) still runs
+   open with the existing warning. Enforced by `assertWorkerSecretInProd()` in `src/config.ts`
+   (runs at module load).
+8. **Worker clamps `buyEth` (SEC-9).** `POST /scan` accepts an optional `buyEth`; the SaaS never
+   sends it, but the worker validates it to a finite number in `(0, 100]` and 400s otherwise, so
+   a direct caller can't request an absurd buy size. See `src/server.ts`.
+9. **⚠️ Payment attribution is NOT production-safe at volume (PAY-1/2/3) — MUST-FIX-before-real-volume.**
+   Settlement matches only `(to=treasury, exact amount)` and does **not** verify the sender, so:
+   a non-paying user can claim another user's inbound transfer (front-running / wrong-account
+   credit); the 1–9999 dust space collides (~118 concurrent same-price orders ≈ 50% chance); and
+   a rounded/overpaid transfer never matches and is stranded. Correct fix = **per-order HD-derived
+   deposit addresses** (needs treasury xpub / key management = owner task) or binding the payer's
+   from-address per order. This lives **web-side** (`web/lib/payments.ts`); recorded here so
+   engine sessions are aware. Full writeup in `SAAS_ARCHITECTURE.md`.
+10. **⚠️ Fingerprinting + IP capture has no consent surface (PRIV-3/7) — owner legal/product decision.**
+    The admin tracking does always-on canvas/WebGL fingerprinting + IP capture with no privacy
+    policy / consent banner. Intentional for abuse tracing but may trigger GDPR/ePrivacy/CCPA.
+    Owner decision before public launch; not a code defect. See `SAAS_ARCHITECTURE.md`.
+11. **Other web-side security items in flight (SEC-1/2/3).** Trusted client-IP derivation
+    (`web/lib/request.ts`), CSP + hardening headers, and explicit Origin/Referer CSRF checks are
+    owned by the **web/** layer. Listed here only so engine sessions know they exist; do not
+    implement them in `src/`. See `SAAS_ARCHITECTURE.md`.
 
 ---
 
@@ -172,6 +198,8 @@ These were discovered the hard way; don't regress them.
 - **Engine / worker** — root `.env` (template `.env.example`): `FORK_RPC_URL` (comma-separated for
   failover; use a dedicated Alchemy/Infura key in prod), `ANVIL_BIN` (full path to `anvil.exe` on
   Windows), `ROUTER_ADDRESS`/`WETH_ADDRESS`, `BUY_ETH`, `WORKER_SHARED_SECRET`.
+  **`WORKER_SHARED_SECRET` is mandatory in production** — the worker refuses to boot if `PORT` is
+  set (or `NODE_ENV=production`) and the secret is missing/empty (CFG-3, §5.7).
 - **Web app** — `web/.env.local` (template `web/.env.example`): `MONGODB_URI`, `SESSION_SECRET`,
   `WORKER_URL` + `WORKER_SHARED_SECRET` (must match the worker), `ADMIN_PATH`, `ADMIN_ACCESS_KEY`,
   `ADMIN_IP_ALLOWLIST`, and `PAY_*` (RPC, USDC token, **`PAY_TREASURY_ADDRESS`** = your receiving wallet).

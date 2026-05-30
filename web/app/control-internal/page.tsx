@@ -75,7 +75,8 @@ export default async function AdminPage() {
       </Section>
 
       <Section title={`Recent scans (${scans.length})`}>
-        <Table head={['When', 'User', 'Token', 'Verdict', 'Risk', 'IP', 'Fingerprint']}>
+        {/* IP/fingerprint deliberately not stored on scans — see the activity log. */}
+        <Table head={['When', 'User', 'Token', 'Verdict', 'Risk']}>
           {scans.map((s) => (
             <tr key={String(s._id)} className="border-t border-neutral-800">
               <Td>{fmt(s.createdAt)}</Td>
@@ -83,8 +84,6 @@ export default async function AdminPage() {
               <Td className="font-mono text-xs">{s.token}</Td>
               <Td>{s.verdict}</Td>
               <Td>{s.riskScore}</Td>
-              <Td>{s.ip}</Td>
-              <Td className="font-mono text-xs">{(s.fingerprint ?? '').slice(0, 12)}</Td>
             </tr>
           ))}
         </Table>

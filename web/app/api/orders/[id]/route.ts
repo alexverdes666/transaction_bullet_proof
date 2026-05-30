@@ -1,4 +1,5 @@
 import type { NextRequest } from 'next/server';
+import { isValidObjectId } from 'mongoose';
 import { connectDb } from '@/lib/db';
 import { requireUser } from '@/lib/auth';
 import { reqContext } from '@/lib/request';
@@ -17,6 +18,8 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
   try {
     const user = await requireUser();
     const { id } = await params;
+    // Guard against a malformed id → Mongoose CastError → 500.
+    if (!isValidObjectId(id)) return fail('Order not found.', 404);
 
     const rl = await rateLimit(`verify:${user.id}`, 30, 60);
     if (!rl.ok) return fail('Too many checks. Slow down.', 429);

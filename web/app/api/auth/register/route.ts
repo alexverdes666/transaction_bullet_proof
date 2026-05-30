@@ -7,6 +7,7 @@ import { reqContext } from '@/lib/request';
 import { rateLimit } from '@/lib/ratelimit';
 import { audit, recordSighting } from '@/lib/audit';
 import { json, fail, handleError } from '@/lib/api';
+import { assertSameOrigin } from '@/lib/csrf';
 import { User } from '@/models/User';
 
 export const runtime = 'nodejs';
@@ -14,6 +15,7 @@ export const runtime = 'nodejs';
 export async function POST(req: NextRequest) {
   const ctx = reqContext(req);
   try {
+    assertSameOrigin(req);
     const rl = await rateLimit(`register:${ctx.ip}`, 5, 3600);
     if (!rl.ok) {
       await audit({ type: 'rate_limited', ctx, detail: { route: 'register' } });

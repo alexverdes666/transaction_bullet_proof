@@ -8,6 +8,7 @@ import { reqContext } from '@/lib/request';
 import { rateLimit } from '@/lib/ratelimit';
 import { audit } from '@/lib/audit';
 import { json, fail, handleError } from '@/lib/api';
+import { assertSameOrigin } from '@/lib/csrf';
 
 export const runtime = 'nodejs';
 
@@ -18,6 +19,7 @@ const schema = z.object({ key: z.string().min(1).max(200) });
 export async function POST(req: NextRequest) {
   const ctx = reqContext(req);
   try {
+    assertSameOrigin(req);
     const rl = await rateLimit(`admin_unlock:${ctx.ip}`, 5, 600);
     if (!rl.ok) return fail('Too many attempts.', 429);
 

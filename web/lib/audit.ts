@@ -59,6 +59,10 @@ export async function audit(input: AuditInput): Promise<void> {
  * Record an IP + fingerprint sighting on the user document (upserting the
  * aggregate arrays and bumping counts). Best-effort.
  */
+// Privacy/data-minimization: cap how many distinct IP / fingerprint sightings we
+// retain per user. `$slice: -N` on the `$push` keeps only the most-recent N.
+const SIGHTING_CAP = 20;
+
 export async function recordSighting(
   userId: Types.ObjectId | string,
   ctx: ReqContext,
@@ -66,7 +70,7 @@ export async function recordSighting(
   await connectDb();
   const now = new Date();
   try {
-    // Bump existing IP sighting, else push a new one.
+    // Bump existing IP sighting, else push a new one (capped to the most recent N).
     const ipRes = await User.updateOne(
       { _id: userId, 'ips.ip': ctx.ip },
       { $set: { 'ips.$.lastSeen': now, lastIp: ctx.ip, lastUserAgent: ctx.userAgent }, $inc: { 'ips.$.count': 1 } },
@@ -74,7 +78,10 @@ export async function recordSighting(
     if (ipRes.matchedCount === 0) {
       await User.updateOne(
         { _id: userId },
-        { $push: { ips: { ip: ctx.ip, firstSeen: now, lastSeen: now, count: 1 } }, $set: { lastIp: ctx.ip, lastUserAgent: ctx.userAgent } },
+        {
+          $push: { ips: { $each: [{ ip: ctx.ip, firstSeen: now, lastSeen: now, count: 1 }], $slice: -SIGHTING_CAP } },
+          $set: { lastIp: ctx.ip, lastUserAgent: ctx.userAgent },
+        },
       );
     }
 
@@ -86,7 +93,14 @@ export async function recordSighting(
       if (fpRes.matchedCount === 0) {
         await User.updateOne(
           { _id: userId },
-          { $push: { fingerprints: { hash: ctx.fingerprint, userAgent: ctx.userAgent, firstSeen: now, lastSeen: now, count: 1 } } },
+          {
+            $push: {
+              fingerprints: {
+                $each: [{ hash: ctx.fingerprint, userAgent: ctx.userAgent, firstSeen: now, lastSeen: now, count: 1 }],
+                $slice: -SIGHTING_CAP,
+              },
+            },
+          },
         );
       }
     }

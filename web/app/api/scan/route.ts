@@ -7,6 +7,7 @@ import { rateLimit } from '@/lib/ratelimit';
 import { audit } from '@/lib/audit';
 import { runScanOnWorker } from '@/lib/worker';
 import { json, fail, handleError } from '@/lib/api';
+import { assertSameOrigin } from '@/lib/csrf';
 import { User } from '@/models/User';
 import { Scan } from '@/models/Scan';
 
@@ -16,6 +17,7 @@ export const maxDuration = 120;
 export async function POST(req: NextRequest) {
   const ctx = reqContext(req);
   try {
+    assertSameOrigin(req);
     const user = await requireUser();
 
     const rl = await rateLimit(`scan:${user.id}`, 20, 60);
@@ -43,9 +45,12 @@ export async function POST(req: NextRequest) {
     try {
       report = await runScanOnWorker(token);
     } catch (e) {
-      // Infra failure is not the user's fault — refund the credit.
-      await User.updateOne({ _id: user.id }, { $inc: { credits: 1 } });
-      await audit({ type: 'scan_denied', ctx, userId: user.id, detail: { token, reason: 'worker_error', error: String(e) } });
+      // Infra failure is not the user's fault — refund the credit. Mirror the
+      // spend's `status: 'active'` guard so a banned user isn't re-credited.
+      await User.updateOne({ _id: user.id, status: 'active' }, { $inc: { credits: 1 } });
+      // Log a stable code, not the raw error string (avoids leaking internals/PII).
+      console.error('scan worker_error', e);
+      await audit({ type: 'scan_denied', ctx, userId: user.id, detail: { token, reason: 'worker_error', error: e instanceof Error ? e.name : 'unknown' } });
       return fail('The scan engine is temporarily unavailable. Your credit was not used.', 503);
     }
 
@@ -57,8 +62,6 @@ export async function POST(req: NextRequest) {
       summary: report.summary,
       report,
       durationMs: report.durationMs,
-      ip: ctx.ip,
-      fingerprint: ctx.fingerprint,
     });
     await audit({ type: 'scan', ctx, userId: user.id, detail: { token, verdict: report.verdict, risk: report.riskScore } });
 

@@ -7,6 +7,7 @@ import { reqContext } from '@/lib/request';
 import { rateLimit } from '@/lib/ratelimit';
 import { audit, recordSighting } from '@/lib/audit';
 import { json, fail, handleError } from '@/lib/api';
+import { assertSameOrigin } from '@/lib/csrf';
 import { User } from '@/models/User';
 
 export const runtime = 'nodejs';
@@ -14,6 +15,7 @@ export const runtime = 'nodejs';
 export async function POST(req: NextRequest) {
   const ctx = reqContext(req);
   try {
+    assertSameOrigin(req);
     // Limit by IP and by account to blunt credential stuffing + targeted attacks.
     const ipRl = await rateLimit(`login:ip:${ctx.ip}`, 10, 900);
     if (!ipRl.ok) {

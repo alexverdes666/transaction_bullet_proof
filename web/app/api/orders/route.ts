@@ -6,6 +6,7 @@ import { rateLimit } from '@/lib/ratelimit';
 import { audit } from '@/lib/audit';
 import { createOrder, CREDIT_PACKS } from '@/lib/payments';
 import { json, fail, handleError } from '@/lib/api';
+import { assertSameOrigin } from '@/lib/csrf';
 
 export const runtime = 'nodejs';
 
@@ -23,6 +24,7 @@ export async function GET() {
 export async function POST(req: NextRequest) {
   const ctx = reqContext(req);
   try {
+    assertSameOrigin(req);
     const user = await requireUser();
     const rl = await rateLimit(`order:${user.id}`, 10, 600);
     if (!rl.ok) return fail('Too many orders. Try again later.', 429);

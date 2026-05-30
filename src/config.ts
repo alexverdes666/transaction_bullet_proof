@@ -37,6 +37,36 @@ function optionalBigint(name: string): bigint | undefined {
   return BigInt(v);
 }
 
+/**
+ * CFG-3: are we running in a deployed (production) environment?
+ *
+ * Render and most container/PaaS hosts inject `PORT`; we also honour the
+ * conventional `NODE_ENV=production`. Local CLI/dev runs have neither.
+ */
+export function isProductionEnv(): boolean {
+  return Boolean(process.env.PORT) || process.env.NODE_ENV === 'production';
+}
+
+/**
+ * CFG-3: fail CLOSED in production. The shared secret is the ONLY thing that
+ * keeps the /scan worker behind the SaaS paywall — if it is missing/empty in a
+ * deployment the worker would run OPEN and let anyone obtain free scans. Refuse
+ * to boot in that case. Local dev (no PORT, no NODE_ENV=production) is allowed to
+ * run open, with the existing warning emitted by src/server.ts.
+ */
+function assertWorkerSecretInProd(): void {
+  if (isProductionEnv() && !(process.env.WORKER_SHARED_SECRET ?? '').trim()) {
+    throw new Error(
+      'WORKER_SHARED_SECRET is required in production (PORT is set or ' +
+        'NODE_ENV=production) but is missing/empty. Refusing to start the scan ' +
+        'worker OPEN — that would bypass the SaaS paywall. Set ' +
+        'WORKER_SHARED_SECRET (it must match the web app).',
+    );
+  }
+}
+
+assertWorkerSecretInProd();
+
 export const config = {
   fork: {
     rpcUrl: str('FORK_RPC_URL', 'https://eth.llamarpc.com'),
@@ -63,7 +93,9 @@ export const config = {
     port: num('PORT', num('CONTROL_PORT', 8645)),
     // Bind public when containerised, loopback-only for local dev.
     host: process.env.PORT ? '0.0.0.0' : '127.0.0.1',
-    // Shared secret gating POST /scan. Empty = dev mode (open). See src/server.ts.
+    // Shared secret gating POST /scan. Empty = dev mode (open) — only permitted
+    // outside production; production is enforced by assertWorkerSecretInProd()
+    // above (CFG-3). See src/server.ts.
     workerSecret: str('WORKER_SHARED_SECRET', ''),
   },
 } as const;
