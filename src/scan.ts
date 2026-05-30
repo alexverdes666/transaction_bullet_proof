@@ -9,10 +9,11 @@
  * The interaction is the deterministic on-chain buy/sell round-trip — the
  * bulletproof core. No browser required.
  */
-import { getAddress } from 'viem';
+import { getAddress, type Address, type PublicClient } from 'viem';
 import { AnvilFork } from './anvil.js';
 import { config } from './config.js';
 import { makePublicClient, makeWalletClient, testAccount } from './clients.js';
+import { erc20Abi } from './abi.js';
 import { fundWallet } from './wallet.js';
 import { captureSnapshotEx } from './snapshot.js';
 import { simulateRoundTrip } from './honeypot.js';
@@ -48,6 +49,40 @@ export interface ScanOptions {
   fork?: AnvilFork;
 }
 
+/**
+ * Fail fast with a plain-English reason when the address isn't a scannable
+ * Ethereum-mainnet ERC-20, instead of surfacing a raw viem error
+ * ("balanceOf returned no data (0x)…") deep from captureSnapshot. The two common
+ * cases: a non-contract address (a wallet, or a token that only exists on
+ * another chain — BSC/Base/Polygon/Solana), and a contract that doesn't
+ * implement ERC-20 balanceOf (an NFT, a proxy, etc.). Thrown errors flow through
+ * runScan's catch into a clean ERROR report.
+ */
+async function assertScannableToken(client: PublicClient, token: Address): Promise<void> {
+  const code = await client.getCode({ address: token });
+  if (!code || code === '0x') {
+    throw new Error(
+      'Not a token contract on Ethereum mainnet. This looks like a wallet ' +
+        'address, or a token that only exists on another chain (BSC, Base, ' +
+        'Polygon, Solana…). Bullet Proof only scans Ethereum-mainnet ERC-20 tokens.',
+    );
+  }
+  try {
+    await client.readContract({
+      address: token,
+      abi: erc20Abi,
+      functionName: 'balanceOf',
+      args: [testAccount.address],
+    });
+  } catch {
+    throw new Error(
+      "This contract doesn't implement the standard ERC-20 balanceOf function, " +
+        'so it is not a token Bullet Proof can scan (it may be an NFT, a proxy ' +
+        'contract, or a token on another chain).',
+    );
+  }
+}
+
 export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
   const started = Date.now();
   const token = getAddress(opts.token);
@@ -61,6 +96,10 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
     const publicClient = makePublicClient(fork.endpoint);
     const walletClient = makeWalletClient(fork.endpoint);
     const wallet = testAccount.address;
+
+    // Reject non-mainnet / non-ERC-20 addresses up front with a clear message,
+    // rather than letting balanceOf fail with a raw viem dump mid-pipeline.
+    await assertScannableToken(publicClient, token);
 
     // a. Fund the mock retail wallet with local ETH.
     await fundWallet(fork, wallet);
