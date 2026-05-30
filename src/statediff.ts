@@ -171,7 +171,8 @@ export function analyze(
         code: 'ELEVATED_SELL_TAX',
         message: `Effective sell tax ~${pct(rt.sellTax)} — above the ${pct(SELL_TAX_WARN)} comfort threshold.`,
       });
-      score += 25;
+      // A double-digit sell tax alone is enough to warrant a SUSPICIOUS verdict.
+      score += 30;
     }
   }
 

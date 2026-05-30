@@ -38,7 +38,8 @@ function payClient() {
   return createPublicClient({ transport: http(env.pay.rpcUrl) });
 }
 
-function baseUnits(whole: number): bigint {
+/** Convert a whole-token price to base units. Exported for unit testing. */
+export function baseUnits(whole: number): bigint {
   return BigInt(Math.round(whole * 10 ** env.pay.tokenDecimals));
 }
 
