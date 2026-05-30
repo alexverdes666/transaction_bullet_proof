@@ -19,6 +19,7 @@ import {
   type Hash,
   type PublicClient,
   type WalletClient,
+  maxUint256,
   parseEther,
 } from 'viem';
 import { config } from './config.js';
@@ -27,10 +28,32 @@ import { balanceOf, readTokenMeta } from './token.js';
 import { extractRevertReason, sleep } from './util.js';
 import type { RoundTripResult } from './types.js';
 
-const MAX_UINT = (1n << 256n) - 1n;
-
 /** How many times to attempt a swap before trusting a revert as real. */
 const TX_ATTEMPTS = 3;
+
+/** Fixed-point scale for bigint ratio math (6 decimal places of precision). */
+const RATIO_SCALE = 1_000_000n;
+
+/**
+ * Compute `received / expected` as a clamped fraction without losing precision.
+ *
+ * `Number(bigint)/Number(bigint)` silently rounds 18-decimal / very large
+ * quantities (a token could exploit this rounding to mask a tax). We instead do
+ * the division in fixed-point bigint, then convert the small scaled integer —
+ * which IS exactly representable as a double — back to a fraction.
+ */
+export function ratioBig(received: bigint, expected: bigint): number {
+  if (expected <= 0n) return -1;
+  const scaled = (received * RATIO_SCALE) / expected; // floor division in bigint
+  return Number(scaled) / Number(RATIO_SCALE);
+}
+
+/** A tax/loss is `1 - ratio`, clamped to [0, 1]; -1 when undeterminable. */
+export function taxFromRatio(received: bigint, expected: bigint): number {
+  const ratio = ratioBig(received, expected);
+  if (ratio < 0) return -1;
+  return clamp01(1 - ratio);
+}
 
 type TxResult =
   | { ok: true; hash: Hash; gasUsed: bigint }
@@ -118,8 +141,10 @@ export async function simulateRoundTrip(inputs: RoundTripInputs): Promise<RoundT
       args: [buyWei, [...buyPath]],
     })) as bigint[];
     result.tokensExpected = amounts[amounts.length - 1] ?? 0n;
-  } catch {
+  } catch (err) {
     // No quotable V2 path. The buy below will confirm whether routing is possible.
+    // Surface it (not silent): a missing buy quote means buyTax can't be measured.
+    console.warn(`[honeypot] buy quote (getAmountsOut) failed: ${extractRevertReason(err)}`);
     result.tokensExpected = 0n;
   }
 
@@ -150,8 +175,7 @@ export async function simulateRoundTrip(inputs: RoundTripInputs): Promise<RoundT
 
   // Effective buy tax: how far short of the honest quote did we land?
   if (result.tokensExpected > 0n) {
-    const ratio = Number(result.tokensReceived) / Number(result.tokensExpected);
-    result.buyTax = clamp01(1 - ratio);
+    result.buyTax = taxFromRatio(result.tokensReceived, result.tokensExpected);
   }
 
   // A buy that yields nothing is already a hard fail — nothing to sell.
@@ -166,7 +190,7 @@ export async function simulateRoundTrip(inputs: RoundTripInputs): Promise<RoundT
       address: token,
       abi: erc20Abi,
       functionName: 'approve',
-      args: [router, MAX_UINT],
+      args: [router, maxUint256],
       account: walletClient.account!,
       chain: walletClient.chain,
     }),
@@ -188,7 +212,11 @@ export async function simulateRoundTrip(inputs: RoundTripInputs): Promise<RoundT
       args: [tokensToSell, [...sellPath]],
     })) as bigint[];
     result.ethExpected = amounts[amounts.length - 1] ?? 0n;
-  } catch {
+  } catch (err) {
+    // Sell quote unavailable. The sell below still runs; but with no honest
+    // baseline, sellTax stays -1 and statediff falls back to ROUNDTRIP_LOSS +
+    // a SELL_TAX_UNKNOWN warning. Surface it rather than swallowing silently.
+    console.warn(`[honeypot] sell quote (getAmountsOut) failed: ${extractRevertReason(err)}`);
     result.ethExpected = 0n;
   }
 
@@ -228,8 +256,7 @@ export async function simulateRoundTrip(inputs: RoundTripInputs): Promise<RoundT
 
   // Effective sell tax vs the honest quote.
   if (result.ethExpected > 0n) {
-    const ratio = Number(result.ethReceived) / Number(result.ethExpected);
-    result.sellTax = clamp01(1 - ratio);
+    result.sellTax = taxFromRatio(result.ethReceived, result.ethExpected);
   }
 
   return finalize(result);
@@ -238,8 +265,7 @@ export async function simulateRoundTrip(inputs: RoundTripInputs): Promise<RoundT
 /** Derive round-trip loss once buy + sell economics are known. */
 function finalize(r: RoundTripResult): RoundTripResult {
   if (r.ethSpent > 0n && r.canSell) {
-    const ratio = Number(r.ethReceived) / Number(r.ethSpent);
-    r.roundTripLoss = clamp01(1 - ratio);
+    r.roundTripLoss = taxFromRatio(r.ethReceived, r.ethSpent);
   }
   return r;
 }

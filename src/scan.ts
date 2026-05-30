@@ -19,6 +19,28 @@ import { simulateRoundTrip } from './honeypot.js';
 import { analyze, diffBalances, diffStorage } from './statediff.js';
 import type { HoneypotReport, RoundTripResult } from './types.js';
 
+/**
+ * Strip credentials/path/query from each comma-separated RPC URL, leaving only
+ * the host. FORK_RPC_URL routinely embeds an Alchemy/Infura API key in its path
+ * (e.g. https://eth-mainnet.g.alchemy.com/v2/<KEY>); since the web app persists
+ * and returns this report verbatim, the key must NEVER appear here. Falls back
+ * to 'redacted' for anything we can't parse.
+ */
+function sanitizeRpcUrl(raw: string): string {
+  return raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((u) => {
+      try {
+        return new URL(u).host;
+      } catch {
+        return 'redacted';
+      }
+    })
+    .join(',');
+}
+
 export interface ScanOptions {
   token: string;
   buyEth?: number;
@@ -86,7 +108,7 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
       storageDiff,
       anomalies,
       fork: {
-        rpcUrl: config.fork.rpcUrl,
+        rpcUrl: sanitizeRpcUrl(config.fork.rpcUrl),
         blockNumber: before.blockNumber.toString(),
         chainId: config.fork.chainId,
       },
@@ -108,7 +130,7 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
         { severity: 'critical', code: 'SCAN_ERROR', message: (err as Error).message },
       ],
       fork: {
-        rpcUrl: config.fork.rpcUrl,
+        rpcUrl: sanitizeRpcUrl(config.fork.rpcUrl),
         blockNumber: '0',
         chainId: config.fork.chainId,
       },

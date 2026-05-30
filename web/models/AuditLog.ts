@@ -1,5 +1,6 @@
 import 'server-only';
 import { Schema, model, models, type InferSchemaType, type Model } from 'mongoose';
+import { AUDIT_TYPES } from '@/lib/audit';
 
 /**
  * Append-only activity trail. Every security-relevant event lands here with the
@@ -8,29 +9,12 @@ import { Schema, model, models, type InferSchemaType, type Model } from 'mongoos
  * PII-bearing trail does not grow without bound.
  */
 
-// Keep in sync with AuditType in lib/audit.ts.
-const AUDIT_TYPES = [
-  'register',
-  'login',
-  'login_failed',
-  'logout',
-  'scan',
-  'scan_denied',
-  'order_created',
-  'order_paid',
-  'order_failed',
-  'admin_view',
-  'admin_login',
-  'admin_denied',
-  'rate_limited',
-];
-
 const AUDIT_TTL_DAYS = 180;
 
 const auditLogSchema = new Schema({
   userId: { type: Schema.Types.ObjectId, ref: 'User', default: null, index: true },
   email: String, // denormalised for fast admin search (e.g. failed logins)
-  type: { type: String, required: true, enum: AUDIT_TYPES, index: true },
+  type: { type: String, required: true, enum: [...AUDIT_TYPES], index: true },
   ip: String,
   userAgent: String,
   fingerprint: String,

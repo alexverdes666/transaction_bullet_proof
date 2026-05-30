@@ -35,3 +35,8 @@ export async function connectDb(): Promise<typeof mongoose> {
   cache.conn = await cache.promise;
   return cache.conn;
 }
+
+/** Detects a MongoDB duplicate-key error (E11000). */
+export function isDuplicateKey(e: unknown): boolean {
+  return typeof e === 'object' && e !== null && (e as { code?: number }).code === 11000;
+}

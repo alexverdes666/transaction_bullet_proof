@@ -2,24 +2,30 @@
 import 'server-only';
 import { Types } from 'mongoose';
 import { connectDb } from './db';
-import { AuditLog } from '@/models/AuditLog';
 import { User } from '@/models/User';
 import type { ReqContext } from './request';
 
-export type AuditType =
-  | 'register'
-  | 'login'
-  | 'login_failed'
-  | 'logout'
-  | 'scan'
-  | 'scan_denied'
-  | 'order_created'
-  | 'order_paid'
-  | 'order_failed'
-  | 'admin_view'
-  | 'admin_login'
-  | 'admin_denied'
-  | 'rate_limited';
+/**
+ * Audit event types — the single source of truth. The Mongoose model imports
+ * this array for its `enum`, and the `AuditType` union is derived from it.
+ */
+export const AUDIT_TYPES = [
+  'register',
+  'login',
+  'login_failed',
+  'logout',
+  'scan',
+  'scan_denied',
+  'order_created',
+  'order_paid',
+  'order_failed',
+  'admin_view',
+  'admin_login',
+  'admin_denied',
+  'rate_limited',
+] as const;
+
+export type AuditType = (typeof AUDIT_TYPES)[number];
 
 interface AuditInput {
   type: AuditType;
@@ -31,6 +37,9 @@ interface AuditInput {
 
 export async function audit(input: AuditInput): Promise<void> {
   await connectDb();
+  // Imported lazily so the model (which imports AUDIT_TYPES from this module)
+  // does not form a static import cycle at module-evaluation time.
+  const { AuditLog } = await import('@/models/AuditLog');
   try {
     await AuditLog.create({
       type: input.type,

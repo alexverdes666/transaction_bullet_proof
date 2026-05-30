@@ -132,7 +132,7 @@ export function analyze(
     return { anomalies, riskScore: 0, verdict: 'ERROR' };
   }
 
-  if (rt.canBuy && rt.tokensReceived === 0n) {
+  if (rt.tokensReceived === 0n) {
     anomalies.push({
       severity: 'critical',
       code: 'ZERO_TOKENS',
@@ -142,7 +142,7 @@ export function analyze(
     score += 70;
   }
 
-  if (rt.canBuy && !rt.canSell) {
+  if (!rt.canSell) {
     anomalies.push({
       severity: 'critical',
       code: 'SELL_REVERTED',
@@ -179,6 +179,21 @@ export function analyze(
       // A double-digit (but sub-honeypot) sell tax warrants a SUSPICIOUS verdict.
       score += 30;
     }
+  }
+
+  // The sell SUCCEEDED but its honest quote was unavailable (getAmountsOut
+  // failed), so sellTax could not be computed. We don't want a real sell-tax
+  // honeypot to slip through under-scored here: ROUNDTRIP_LOSS (below) still
+  // measures the economics end-to-end, but we ALSO emit an explicit warning so
+  // the measurement gap is visible. Small/zero score — healthy tokens that
+  // quote fine (e.g. USDC) never reach this branch.
+  if (rt.canSell && rt.sellTax < 0) {
+    anomalies.push({
+      severity: 'warning',
+      code: 'SELL_TAX_UNKNOWN',
+      message:
+        'Sell tax could not be measured — the sell quote was unavailable. Verdict relies on the round-trip loss instead.',
+    });
   }
 
   if (rt.canSell && rt.buyTax >= 0 && rt.sellTax >= 0) {

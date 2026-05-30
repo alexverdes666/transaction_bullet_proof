@@ -50,7 +50,12 @@ export async function captureSnapshot(inputs: SnapshotInputs): Promise<StateSnap
   const storage: StorageReading[] = [];
   const slot = await findBalanceSlot(client, token, wallet).catch(() => null);
   if (slot) {
-    const value = (await client.getStorageAt({ address: token, slot: slot.storageKey })) as Hash;
+    // getStorageAt can return undefined (slot never written). Default to the zero
+    // hash rather than casting `undefined as Hash`, which would otherwise diff as
+    // a phantom change and trigger a false STORAGE_DELTA.
+    const ZERO_HASH = ('0x' + '0'.repeat(64)) as Hash;
+    const raw = await client.getStorageAt({ address: token, slot: slot.storageKey });
+    const value: Hash = typeof raw === 'string' && raw.startsWith('0x') ? (raw as Hash) : ZERO_HASH;
     storage.push({
       account: token,
       slot: slot.storageKey,
@@ -67,16 +72,4 @@ export async function captureSnapshot(inputs: SnapshotInputs): Promise<StateSnap
     storage,
     takenAt: Date.now(),
   };
-}
-
-/** Convenience accessor: native ETH from a snapshot. */
-export function ethOf(s: StateSnapshot): bigint {
-  return s.balances.find((b) => b.token === null)?.raw ?? 0n;
-}
-
-/** Convenience accessor: a token's raw balance from a snapshot. */
-export function tokenOf(s: StateSnapshot, token: Address): bigint {
-  return (
-    s.balances.find((b) => b.token?.toLowerCase() === token.toLowerCase())?.raw ?? 0n
-  );
 }

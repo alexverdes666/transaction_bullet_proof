@@ -67,7 +67,3 @@ export const config = {
     workerSecret: str('WORKER_SHARED_SECRET', ''),
   },
 } as const;
-
-export function rpcUrl(): string {
-  return `http://127.0.0.1:${config.fork.anvilPort}`;
-}

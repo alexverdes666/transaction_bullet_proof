@@ -13,11 +13,20 @@ function req(name: string): string {
 function opt(name: string, fallback = ''): string {
   return process.env[name] ?? fallback;
 }
-function int(name: string, fallback: number): number {
+interface IntOpts {
+  min?: number;
+}
+
+function int(name: string, fallback: number, opts: IntOpts = {}): number {
   const v = process.env[name];
   if (v === undefined || v === '') return fallback;
+  // Require a clean integer string: reject fractional/garbage input.
+  if (!/^-?\d+$/.test(v.trim())) throw new Error(`Env ${name} must be an integer`);
   const n = Number(v);
-  if (!Number.isFinite(n)) throw new Error(`Env ${name} not a number`);
+  if (!Number.isInteger(n)) throw new Error(`Env ${name} must be an integer`);
+  if (opts.min !== undefined && n < opts.min) {
+    throw new Error(`Env ${name} must be >= ${opts.min}`);
+  }
   return n;
 }
 
@@ -43,13 +52,13 @@ export const env = {
   // Crypto payments: on-chain verification config.
   pay: {
     rpcUrl: opt('PAY_RPC_URL', 'https://ethereum-rpc.publicnode.com'),
-    chainId: int('PAY_CHAIN_ID', 1),
+    chainId: int('PAY_CHAIN_ID', 1, { min: 1 }),
     tokenAddress: opt('PAY_TOKEN_ADDRESS', '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48'), // USDC
-    tokenDecimals: int('PAY_TOKEN_DECIMALS', 6),
+    tokenDecimals: int('PAY_TOKEN_DECIMALS', 6, { min: 0 }),
     tokenSymbol: opt('PAY_TOKEN_SYMBOL', 'USDC'),
     treasury: opt('PAY_TREASURY_ADDRESS', ''), // where users send funds
-    minConfirmations: int('PAY_MIN_CONFIRMATIONS', 6),
-    orderTtlMinutes: int('PAY_ORDER_TTL_MINUTES', 60),
+    minConfirmations: int('PAY_MIN_CONFIRMATIONS', 6, { min: 1 }),
+    orderTtlMinutes: int('PAY_ORDER_TTL_MINUTES', 60, { min: 1 }),
   },
 
   isProd: process.env.NODE_ENV === 'production',

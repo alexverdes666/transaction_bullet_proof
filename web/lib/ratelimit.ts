@@ -4,7 +4,7 @@
  * cold start.
  */
 import 'server-only';
-import { connectDb } from './db';
+import { connectDb, isDuplicateKey } from './db';
 import { RateLimit } from '@/models/RateLimit';
 
 export interface RateLimitResult {
@@ -38,7 +38,7 @@ export async function rateLimit(
   } catch (e) {
     // Unique-index race: two requests opened the same fresh window at once and
     // both tried to insert. The bucket now exists, so retry as a plain increment.
-    if (isDuplicateKeyError(e)) {
+    if (isDuplicateKey(e)) {
       doc = await RateLimit.findOneAndUpdate({ key: bucketKey }, { $inc: { count: 1 } }, { new: true });
     } else {
       throw e;
@@ -47,8 +47,4 @@ export async function rateLimit(
 
   const count = doc?.count ?? 1;
   return { ok: count <= limit, remaining: Math.max(0, limit - count) };
-}
-
-function isDuplicateKeyError(e: unknown): boolean {
-  return !!e && typeof e === 'object' && 'code' in e && (e as { code?: number }).code === 11000;
 }

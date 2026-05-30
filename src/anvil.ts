@@ -13,6 +13,18 @@ import { createPublicClient, http, type Hash, type PublicClient } from 'viem';
 import { config } from './config.js';
 import { sleep } from './util.js';
 
+/**
+ * Live-fork registry. Every started fork registers itself here and deregisters
+ * on stop, so a graceful shutdown handler (see src/server.ts) can tear down all
+ * anvil children rather than orphaning them on a Render redeploy (SIGTERM).
+ */
+const liveForks = new Set<AnvilFork>();
+
+/** Stop every currently-live fork. Best-effort; never throws. */
+export async function stopAllForks(): Promise<void> {
+  await Promise.allSettled([...liveForks].map((f) => f.stop()));
+}
+
 /** Ask the OS for a free TCP port on loopback (port 0 = ephemeral). */
 function findFreePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -73,6 +85,10 @@ export class AnvilFork {
   private port: number;
   private url: string;
   public client: PublicClient;
+  /** Captured spawn-level failure (e.g. ENOENT: bad ANVIL_BIN) so startup can
+   *  reject promptly with the real cause instead of waiting out the readiness
+   *  timeout and surfacing a misleading "RPC did not become ready". */
+  private spawnError: Error | null = null;
 
   /**
    * @param opts.port  Bind to this specific port. Omit (the default) to grab a
@@ -148,10 +164,12 @@ export class AnvilFork {
     });
 
     this.proc.on('error', (e) => {
-      console.error(
-        `[anvil] failed to spawn. Is Foundry installed and ANVIL_BIN correct? (${config.fork.anvilBin})`,
-        e.message,
+      // ENOENT / EACCES etc. — the binary never launched. Record it so
+      // waitUntilReady() can bail out immediately with the real cause.
+      this.spawnError = new Error(
+        `[anvil] failed to spawn. Is Foundry installed and ANVIL_BIN correct? (${config.fork.anvilBin}): ${e.message}`,
       );
+      console.error(this.spawnError.message);
     });
     if (!opts.quiet) {
       this.proc.stdout?.on('data', (d) => process.stdout.write(`[anvil] ${d}`));
@@ -165,6 +183,7 @@ export class AnvilFork {
     await this.waitUntilReady();
     this.client = createPublicClient({ transport: http(this.url) });
     const block = await this.client.getBlockNumber();
+    liveForks.add(this);
     console.log(`[anvil] fork live at ${this.url} (forked block ${block})`);
   }
 
@@ -183,6 +202,9 @@ export class AnvilFork {
     const probe = createPublicClient({ transport: http(this.url) });
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
+      // A spawn-level error (bad ANVIL_BIN/ENOENT) means anvil will never come
+      // up — fail fast with the real reason rather than waiting out the timeout.
+      if (this.spawnError) throw this.spawnError;
       if (!this.proc) throw new Error('[anvil] process died during startup');
       try {
         await probe.getChainId();
@@ -194,24 +216,20 @@ export class AnvilFork {
     throw new Error(`[anvil] RPC did not become ready within ${timeoutMs}ms`);
   }
 
-  /** Take an EVM snapshot. The returned id can later be passed to {@link revert}. */
+  /** Take an EVM snapshot. The returned id can later be passed to evm_revert. */
   async snapshot(): Promise<Hash> {
-    return (await this.rpc('evm_snapshot', [])) as Hash;
-  }
-
-  /** Revert the fork to a prior snapshot id. Returns true on success. */
-  async revert(id: Hash): Promise<boolean> {
-    return (await this.rpc('evm_revert', [id])) as boolean;
+    const id = await this.rpc('evm_snapshot', []);
+    // evm_snapshot returns a 0x-quantity string; validate before casting so a
+    // malformed/empty result can't masquerade as a valid snapshot id.
+    if (typeof id !== 'string' || !id.startsWith('0x')) {
+      throw new Error(`[anvil] evm_snapshot returned an unexpected value: ${String(id)}`);
+    }
+    return id as Hash;
   }
 
   /** Set an account's ETH balance directly (anvil cheatcode). */
   async setBalance(address: string, wei: bigint): Promise<void> {
     await this.rpc('anvil_setBalance', [address, `0x${wei.toString(16)}`]);
-  }
-
-  /** Mine `n` blocks (used to advance past deadlines if needed). */
-  async mine(n = 1): Promise<void> {
-    await this.rpc('anvil_mine', [`0x${n.toString(16)}`]);
   }
 
   /** Raw JSON-RPC passthrough for anvil-specific cheatcodes viem doesn't model. */
@@ -232,15 +250,18 @@ export class AnvilFork {
 
   /** Kill the child process tree and free the port. Safe to call repeatedly. */
   async stop(): Promise<void> {
+    liveForks.delete(this);
     if (!this.proc) return;
     const p = this.proc;
     this.proc = null;
 
     await new Promise<void>((resolve) => {
       let done = false;
+      let hardKill: ReturnType<typeof setTimeout> | undefined;
       const finish = () => {
         if (done) return;
         done = true;
+        if (hardKill) clearTimeout(hardKill); // don't leave the timer dangling
         resolve();
       };
       p.once('exit', finish);
@@ -248,13 +269,17 @@ export class AnvilFork {
       if (process.platform === 'win32' && p.pid !== undefined) {
         // taskkill /T terminates the entire tree, so even if a shell wrapper
         // ever sits in between, anvil.exe itself is reaped (no port orphan).
-        spawn('taskkill', ['/PID', String(p.pid), '/T', '/F'], { stdio: 'ignore' });
+        const tk = spawn('taskkill', ['/PID', String(p.pid), '/T', '/F'], { stdio: 'ignore' });
+        // If taskkill itself is missing/unspawnable, the 'error' event would
+        // otherwise be uncaught and crash the process — swallow and fall back to
+        // the SIGKILL timer below.
+        tk.on('error', (e) => console.error(`[anvil] taskkill failed: ${e.message}`));
       } else {
         p.kill('SIGTERM');
       }
 
       // Hard-kill fallback if it ignores termination.
-      setTimeout(() => {
+      hardKill = setTimeout(() => {
         try {
           p.kill('SIGKILL');
         } catch {

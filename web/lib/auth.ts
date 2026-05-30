@@ -3,12 +3,34 @@
  * `getSessionUser` is the single source of truth; these add role/access checks.
  */
 import 'server-only';
+import { timingSafeEqual } from 'node:crypto';
 import { cookies } from 'next/headers';
 import { env } from './env';
 import { getSessionUser, type AuthedUser } from './session';
 import type { ReqContext } from './request';
 
 export const ADMIN_KEY_COOKIE = 'bp_admin_key';
+
+/**
+ * Constant-time equality for the admin access key, to avoid leaking the key via
+ * response-timing (matches the project's convention in src/server.ts and
+ * lib/password.ts). Length-guarded since timingSafeEqual requires equal lengths.
+ */
+export function constantTimeEqual(a: string, b: string): boolean {
+  const ab = Buffer.from(a, 'utf8');
+  const bb = Buffer.from(b, 'utf8');
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
+}
+
+/**
+ * True iff `provided` matches the configured admin access key. Returns false if
+ * no key is configured or none was provided.
+ */
+export function checkAdminKey(provided: string | undefined | null): boolean {
+  if (!env.adminAccessKey || !provided) return false;
+  return constantTimeEqual(provided, env.adminAccessKey);
+}
 
 export class AuthError extends Error {
   constructor(
@@ -43,7 +65,7 @@ export async function adminGate(ctx: ReqContext): Promise<{ gate: AdminGate; use
   }
   if (env.adminAccessKey) {
     const jar = await cookies();
-    if (jar.get(ADMIN_KEY_COOKIE)?.value !== env.adminAccessKey) {
+    if (!checkAdminKey(jar.get(ADMIN_KEY_COOKIE)?.value)) {
       return { gate: 'needs_unlock', user };
     }
   }

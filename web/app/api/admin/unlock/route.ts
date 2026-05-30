@@ -2,7 +2,7 @@ import type { NextRequest } from 'next/server';
 import { cookies } from 'next/headers';
 import { z } from 'zod';
 import { getSessionUser } from '@/lib/session';
-import { ADMIN_KEY_COOKIE } from '@/lib/auth';
+import { ADMIN_KEY_COOKIE, checkAdminKey } from '@/lib/auth';
 import { env } from '@/lib/env';
 import { reqContext } from '@/lib/request';
 import { rateLimit } from '@/lib/ratelimit';
@@ -28,7 +28,7 @@ export async function POST(req: NextRequest) {
     }
 
     const { key } = schema.parse(await req.json());
-    if (!env.adminAccessKey || key !== env.adminAccessKey) {
+    if (!checkAdminKey(key)) {
       await audit({ type: 'admin_denied', ctx, userId: user.id, detail: { step: 'bad_key' } });
       return fail('Invalid key', 401);
     }

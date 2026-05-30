@@ -6,8 +6,8 @@
 import 'server-only';
 import mongoose from 'mongoose';
 import { randomBytes, randomInt } from 'node:crypto';
-import { createPublicClient, http, parseAbiItem, getAddress, type Address } from 'viem';
-import { connectDb } from './db';
+import { createPublicClient, http, parseAbiItem, getAddress, parseUnits, type Address } from 'viem';
+import { connectDb, isDuplicateKey } from './db';
 import { env } from './env';
 import { Order, type OrderDoc } from '@/models/Order';
 import { User } from '@/models/User';
@@ -35,13 +35,21 @@ const TRANSFER_EVENT = parseAbiItem(
   'event Transfer(address indexed from, address indexed to, uint256 value)',
 );
 
+let cachedClient: ReturnType<typeof createPublicClient> | null = null;
+
 function payClient() {
-  return createPublicClient({ transport: http(env.pay.rpcUrl) });
+  // The RPC endpoint is static (env.pay.rpcUrl), so reuse one client across
+  // calls instead of building a new one every time.
+  if (!cachedClient) {
+    cachedClient = createPublicClient({ transport: http(env.pay.rpcUrl) });
+  }
+  return cachedClient;
 }
 
 /** Convert a whole-token price to base units. Exported for unit testing. */
 export function baseUnits(whole: number): bigint {
-  return BigInt(Math.round(whole * 10 ** env.pay.tokenDecimals));
+  // viem's parseUnits avoids float-rounding error of `whole * 10 ** decimals`.
+  return parseUnits(String(whole), env.pay.tokenDecimals);
 }
 
 /**
@@ -102,23 +110,28 @@ export async function verifyOrder(orderId: string): Promise<VerifyResult> {
     return { status: 'paid', txHash: order.txHash ?? undefined, creditsGranted: order.credits };
   }
 
-  if (order.expiresAt.getTime() < Date.now()) {
-    await Order.updateOne({ _id: order._id, status: 'pending' }, { $set: { status: 'expired' } });
-    return { status: 'expired' };
-  }
-
   const client = payClient();
   const latest = await client.getBlockNumber();
   const maxConfirmedBlock = latest - BigInt(env.pay.minConfirmations);
   if (maxConfirmedBlock < BigInt(order.fromBlock)) return { status: 'pending' }; // nothing confirmed yet
 
-  const logs = await client.getLogs({
-    address: order.tokenAddress as Address,
-    event: TRANSFER_EVENT,
-    args: { to: order.treasury as Address },
-    fromBlock: BigInt(order.fromBlock),
-    toBlock: maxConfirmedBlock,
-  });
+  // Scan the chain for a settling transfer BEFORE honouring the TTL, so a
+  // just-in-time payment near expiry isn't lost by an early `expired` flip.
+  let logs;
+  try {
+    logs = await client.getLogs({
+      address: order.tokenAddress as Address,
+      event: TRANSFER_EVENT,
+      args: { to: order.treasury as Address },
+      fromBlock: BigInt(order.fromBlock),
+      toBlock: maxConfirmedBlock,
+    });
+  } catch (e) {
+    // Public RPCs can reject on block-range/result caps. Treat as transient and
+    // retryable rather than a hard 500.
+    console.warn('verifyOrder getLogs failed; treating as pending', e);
+    return { status: 'pending' };
+  }
 
   const want = BigInt(order.amount);
   for (const log of logs) {
@@ -145,11 +158,14 @@ export async function verifyOrder(orderId: string): Promise<VerifyResult> {
       throw e;
     }
   }
-  return { status: 'pending' };
-}
 
-function isDuplicateKey(e: unknown): boolean {
-  return typeof e === 'object' && e !== null && (e as { code?: number }).code === 11000;
+  // No settling transfer found — now honour the TTL.
+  if (order.expiresAt.getTime() < Date.now()) {
+    await Order.updateOne({ _id: order._id, status: 'pending' }, { $set: { status: 'expired' } });
+    return { status: 'expired' };
+  }
+
+  return { status: 'pending' };
 }
 
 /**
