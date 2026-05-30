@@ -14,3 +14,7 @@ reports/*.json
 # Logs
 *.log
 anvil.log
+.vercel
+
+.vercel
+_vercel_deploy*.log
