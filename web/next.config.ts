@@ -34,6 +34,19 @@ const securityHeaders = [
   { key: "Referrer-Policy", value: "no-referrer" },
 ];
 
+// Admin URL obfuscation via rewrites (NOT middleware).
+//
+// Next 16 renamed middleware -> proxy and defaults it to the Node.js runtime,
+// which Vercel's current build pipeline does not wire into the deployed
+// middleware manifest (verified: middleware-manifest.json stays empty), so a
+// `proxy.ts`/`middleware.ts` rewrite silently never runs in production. Config
+// `rewrites()` compile into routes-manifest.json, which Vercel always honors —
+// so the secret admin path is mapped here instead. The destination route
+// (`/control-internal`) is itself hard-protected (admin role + access-key cookie
+// + optional IP allowlist); the secret path is only obfuscation on top.
+const RAW_ADMIN_PATH = process.env.ADMIN_PATH || "";
+const ADMIN_PATH = RAW_ADMIN_PATH ? RAW_ADMIN_PATH.replace(/^\/+/, "") : "";
+
 const nextConfig: NextConfig = {
   // The repo root also has a package-lock.json (the scan engine). Pin Turbopack's
   // root to this app so it doesn't infer the monorepo root.
@@ -42,10 +55,16 @@ const nextConfig: NextConfig = {
   },
   // Mongoose is a server-only dependency; keep it external to the server bundle.
   serverExternalPackages: ["mongoose"],
-  // Security headers on EVERY route (pages + API). Unlike proxy.ts this also
-  // covers /api responses.
+  // Security headers on EVERY route (pages + API).
   async headers() {
     return [{ source: "/:path*", headers: securityHeaders }];
+  },
+  async rewrites() {
+    if (!ADMIN_PATH) return [];
+    return [
+      { source: `/${ADMIN_PATH}`, destination: "/control-internal" },
+      { source: `/${ADMIN_PATH}/:path*`, destination: "/control-internal/:path*" },
+    ];
   },
 };
 
