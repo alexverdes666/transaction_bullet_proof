@@ -1,0 +1,27 @@
+{
+  "name": "crypto-transaction-bullet-proof",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Headless sandbox for smart-contract reverse-engineering and honeypot / hidden-tax detection via mainnet forking + EVM state diffing.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "scan": "tsx src/index.ts",
+    "server": "tsx src/server.ts",
+    "orchestrate": "tsx src/orchestrator.ts",
+    "mock-dapp": "tsx src/mockDappServer.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
