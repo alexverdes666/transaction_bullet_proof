@@ -43,6 +43,10 @@ document.getElementById('cfg').textContent = JSON.stringify(CFG, null, 2);
 
 const $ = (id) => document.getElementById(id);
 const log = (msg, cls) => { const el=$('status'); el.className = cls||''; el.textContent = msg; };
+// Signal automation via DOM attributes. The DOM is shared across browser JS
+// "worlds", whereas window globals are NOT reliably visible to the automation
+// driver (esp. Firefox/Camoufox) — so DOM is the robust cross-world channel.
+const signal = (k, v) => { document.documentElement.setAttribute('data-bp-' + k, String(v)); };
 
 // --- Provider selection ------------------------------------------------------
 // Prefer an injected EIP-1193 provider (window.ethereum) — that's what the
@@ -51,9 +55,11 @@ const log = (msg, cls) => { const el=$('status'); el.className = cls||''; el.tex
 function makeProvider() {
   if (window.ethereum && typeof window.ethereum.request === 'function') {
     log('using injected EIP-1193 provider (window.ethereum)', 'ok');
+    signal('provider', window.ethereum.isMetaMask ? 'injected-metamask' : 'injected');
     return window.ethereum;
   }
   log('no injected provider — using direct JSON-RPC fallback', 'muted');
+  signal('provider', 'fallback');
   let id = 0;
   return {
     request: async ({ method, params }) => {
@@ -126,11 +132,11 @@ $('connect').onclick = async () => {
   try {
     const accts = await provider.request({ method: 'eth_requestAccounts' });
     account = (accts && accts[0] ? accts[0] : CFG.account).toLowerCase();
-    window.__SANDBOX_CONNECTED = true;            // signal flag for the automation
+    signal('connected', '1');                     // DOM signal for the automation
     log('connected: ' + account, 'ok');
     $('approve').disabled = false;
     $('swap').disabled = false;
-  } catch (e) { log('connect failed: ' + e.message, 'err'); }
+  } catch (e) { signal('error', 'connect:' + e.message); log('connect failed: ' + e.message, 'err'); }
 };
 
 $('approve').onclick = async () => {
@@ -138,10 +144,10 @@ $('approve').onclick = async () => {
     log('approving router...', 'muted');
     const hash = await sendTx({ from: account, to: CFG.token, data: encApprove(CFG.router) });
     const rec = await waitMined(hash);
-    window.__SANDBOX_APPROVED = rec && rec.status !== '0x0';
-    log('approve ' + (window.__SANDBOX_APPROVED ? 'OK' : 'REVERTED') + ' — ' + hash,
-        window.__SANDBOX_APPROVED ? 'ok' : 'err');
-  } catch (e) { window.__SANDBOX_APPROVED = false; log('approve failed: ' + e.message, 'err'); }
+    const ok = rec && rec.status !== '0x0';
+    signal('approved', ok ? '1' : '0');
+    log('approve ' + (ok ? 'OK' : 'REVERTED') + ' — ' + hash, ok ? 'ok' : 'err');
+  } catch (e) { signal('approved', '0'); signal('error', 'approve:' + e.message); log('approve failed: ' + e.message, 'err'); }
 };
 
 $('swap').onclick = async () => {
@@ -152,11 +158,11 @@ $('swap').onclick = async () => {
       data: encSwapBuy(account, deadline()),
     });
     const rec = await waitMined(hash);
-    window.__SANDBOX_SWAPPED = rec && rec.status !== '0x0';
-    window.__SANDBOX_SWAP_TX = hash;
-    log('swap ' + (window.__SANDBOX_SWAPPED ? 'OK' : 'REVERTED') + ' — ' + hash,
-        window.__SANDBOX_SWAPPED ? 'ok' : 'err');
-  } catch (e) { window.__SANDBOX_SWAPPED = false; log('swap failed: ' + e.message, 'err'); }
+    const ok = rec && rec.status !== '0x0';
+    signal('swaptx', hash);
+    signal('swapped', ok ? '1' : '0');
+    log('swap ' + (ok ? 'OK' : 'REVERTED') + ' — ' + hash, ok ? 'ok' : 'err');
+  } catch (e) { signal('swapped', '0'); signal('error', 'swap:' + e.message); log('swap failed: ' + e.message, 'err'); }
 };
 </script>
 </body>

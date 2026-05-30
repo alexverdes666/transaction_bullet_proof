@@ -87,4 +87,10 @@
     );
   window.addEventListener('eip6963:requestProvider', announce);
   announce();
+
+  // Diagnostic marker: proves this code executed in the page's MAIN world
+  // (the DOM is shared, so the automation can read it back).
+  try {
+    document.documentElement.setAttribute('data-bp-wallet', window.ethereum ? 'installed' : 'noeth');
+  } catch (e) { /* ignore */ }
 })();

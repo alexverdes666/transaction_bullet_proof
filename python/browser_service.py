@@ -22,6 +22,7 @@ Exit code 0 == the Approve + Swap workflow was driven successfully.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -44,12 +45,29 @@ def env(name: str, default: str | None = None) -> str:
 
 
 def build_injection(rpc: str, account: str, chain_id_hex: str) -> str:
-    """Load the provider shim and substitute connection placeholders."""
-    js = PROVIDER_JS.read_text(encoding="utf-8")
-    return (
-        js.replace("__RPC__", rpc)
+    """Build the init script that installs the mock wallet in the PAGE MAIN world.
+
+    Critical detail: in Playwright/Firefox (and Camoufox) `add_init_script` runs in
+    an ISOLATED world — globals it defines (like `window.ethereum`) are invisible to
+    the page's own scripts, so a real dApp would never see the wallet. To reach the
+    page main world we append a <script> element to the DOM (which is shared); its
+    body executes in the main world exactly like a page script, so `window.ethereum`
+    is where the dApp looks for it.
+    """
+    provider = (
+        PROVIDER_JS.read_text(encoding="utf-8")
+        .replace("__RPC__", rpc)
         .replace("__ACCOUNT__", account)
         .replace("__CHAINID__", chain_id_hex)
+    )
+    # json.dumps safely encodes the provider source as a JS string literal.
+    return (
+        "(() => {\n"
+        "  const s = document.createElement('script');\n"
+        f"  s.textContent = {json.dumps(provider)};\n"
+        "  (document.head || document.documentElement).appendChild(s);\n"
+        "  s.remove();\n"
+        "})();"
     )
 
 
@@ -76,17 +94,25 @@ def click_when_ready(page, selector: str, label: str, timeout_ms: int = 15000) -
     log(f"clicked '{label}'")
 
 
-def wait_flag(page, flag: str, timeout_ms: int = 30000) -> bool:
-    """Poll a window.__SANDBOX_* boolean the dApp sets after each step."""
+def read_signal(page, name: str):
+    """Read a `data-bp-<name>` attribute the dApp sets on <html>.
+
+    The DOM is shared across the browser's JS worlds; window globals set by page
+    scripts are NOT reliably visible to the automation driver (Firefox/Camoufox
+    isolates page script globals from page.evaluate). So we signal via the DOM.
+    """
+    return page.evaluate(f"() => document.documentElement.getAttribute('data-bp-{name}')")
+
+
+def wait_signal(page, name: str, timeout_ms: int = 30000):
+    """Poll until `data-bp-<name>` is set; return its value."""
     deadline = time.time() + timeout_ms / 1000
     while time.time() < deadline:
-        val = page.evaluate(f"() => window.{flag}")
-        if val is True:
-            return True
-        if val is False:
-            return False  # explicit failure signalled by the page
-        time.sleep(0.25)
-    raise TimeoutError(f"timed out waiting for window.{flag}")
+        val = read_signal(page, name)
+        if val is not None and val != "":
+            return val
+        time.sleep(0.2)
+    raise TimeoutError(f"timed out waiting for data-bp-{name}")
 
 
 def main() -> int:
@@ -126,6 +152,9 @@ def main() -> int:
     try:
         with Camoufox(**camoufox_opts) as browser:
             page = browser.new_page()
+            # Surface page-side console + errors for debugging the injected flow.
+            page.on("console", lambda m: log(f"PAGE[{m.type}] {m.text}"))
+            page.on("pageerror", lambda e: log(f"PAGE ERROR: {e}"))
             # Inject the EIP-1193 provider before any page script executes.
             page.add_init_script(injection)
 
@@ -133,22 +162,25 @@ def main() -> int:
             page.goto(dapp_url, wait_until="load", timeout=30000)
 
             # --- Drive the Connect -> Approve -> Swap workflow ----------------
+            # Did the injected wallet code run in the page main world?
+            log("wallet marker = " + str(read_signal(page, "wallet")))
+
             click_when_ready(page, "#connect", "Connect Wallet")
-            if not wait_flag(page, "__SANDBOX_CONNECTED"):
-                log("ERROR: wallet did not connect")
-                return 5
+            wait_signal(page, "connected")
+            # Which provider did the PAGE actually use (injected wallet vs fallback)?
+            log("page provider = " + str(read_signal(page, "provider")))
 
             click_when_ready(page, "#approve", "Approve")
-            approved = wait_flag(page, "__SANDBOX_APPROVED")
+            approved = wait_signal(page, "approved")
             log(f"approve result: {approved}")
 
             click_when_ready(page, "#swap", "Swap (buy)")
-            swapped = wait_flag(page, "__SANDBOX_SWAPPED")
-            tx = page.evaluate("() => window.__SANDBOX_SWAP_TX || null")
+            swapped = wait_signal(page, "swapped")
+            tx = read_signal(page, "swaptx")
             log(f"swap result: {swapped}  tx={tx}")
 
-            # A reverted swap is NOT a service failure — it is a finding the Node
-            # diff layer will interpret. We only fail hard on infra errors.
+            # A reverted swap is NOT a service failure — it's a finding for the Node
+            # diff layer. We only fail hard on infra errors.
             log("workflow complete")
             return 0
     except Exception as exc:  # noqa: BLE001 - top-level guard, report cleanly

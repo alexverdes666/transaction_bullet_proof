@@ -52,7 +52,7 @@ Browser ─https─▶ Next.js web app (Vercel) ─https + X-Worker-Secret─▶
 |-----------|----------|------|------|
 | **Scan engine / worker** | `src/` (+ `Dockerfile.worker`) | Render | Forks mainnet, runs the buy→sell simulation, returns a JSON report. Internal-only; gated by a shared secret. |
 | **Web app** | `web/` (Next.js 16, React 19, App Router) | Vercel | The only public surface: landing, email+password auth, dashboard/scan UI, crypto checkout, hidden admin panel, all DB access. Calls the worker. |
-| **Python/Camoufox browser layer** | `python/` | (optional) | Anti-fingerprint headless browser that drives a real dApp *frontend's* Approve/Swap flow against the fork. Complementary; the on-chain engine is the authoritative detector. **Built but not yet runtime-tested** (needs `pip install -r python/requirements.txt && python -m camoufox fetch`). |
+| **Python/Camoufox browser layer** | `python/` | (optional) | Anti-fingerprint headless browser that drives a dApp's Connect/Approve/**Buy** flow against the fork. **Tested & working** as a "browser deep-scan": the browser performs the buy (catching buy-side anti-bot/frontend tricks), then the engine verifies the **sell** on-chain (`simulateSellOnly`) → a complete browser-grounded verdict. Run via `npm run orchestrate -- <token>`. **Known limitation:** Camoufox's `add_init_script` does not reach the page's main JS world, so injecting a wallet into a *real arbitrary* dApp is unreliable — the bundled mock dApp works via a built-in fallback shim. Not wired into the paid SaaS (see §5/§10). |
 | **Database** | Mongoose models in `web/models/` | MongoDB Atlas | `users`, `sessions`, `orders`, `scans`, `auditlogs`, `ratelimits`. |
 
 ---
@@ -159,6 +159,13 @@ These were discovered the hard way; don't regress them.
    tsc checks; use `BigInt(5)`. Runtime/SWC handles bigint fine; this is only a type-check thing.
 6. **Secrets never get committed.** Engine config in root `.env`; web secrets in `web/.env.local`.
    Both are gitignored. Always `git diff --cached --name-only | grep env` before committing.
+7. **Browser automation must signal via the DOM, not `window` globals.** In Camoufox/Firefox the
+   page's own scripts run in a different JS world from Playwright's `page.evaluate`; only the DOM is
+   shared. The mock dApp signals via `data-bp-*` attributes on `<html>` and the Python driver reads
+   those (`python/browser_service.py`, `src/web/mock-dapp.html`). Relatedly, `add_init_script` runs
+   in an isolated world here and does **not** install `window.ethereum` into the page main world —
+   real-dApp wallet injection needs a different mechanism (e.g. a real wallet extension via a
+   persistent context). This is the main open limitation of the browser layer.
 
 ---
 
@@ -219,9 +226,15 @@ All three layers pass against real MongoDB Atlas + a live worker.
 
 - **Done & tested:** scan engine, worker, web app (auth, paywall, crypto payments, admin, tracking),
   full test suite, deployment artifacts.
-- **Built but not runtime-tested:** the Python/Camoufox browser layer.
-- **Not built yet (candidates):** admin actions (ban / grant credits / revoke sessions), email
-  verification, password reset, a real deploy walkthrough.
+- **Tested & working (CLI only):** the Python/Camoufox browser deep-scan (browser buy + on-chain
+  sell verification → `npm run orchestrate -- <token>`). Verified SAFE on mainnet USDC. **Not yet
+  wired into the SaaS** because: (a) against the bundled mock dApp it does the same Uniswap buy the
+  deterministic engine already does (no extra detection value for plain token scans), and (b) its
+  unique value — testing real dApp frontends / anti-bot walls — is blocked by the Camoufox
+  main-world wallet-injection limitation (§5.7). Decision pending: solve real-dApp injection (real
+  wallet extension via persistent context) to make it a premium "deep scan", or keep it experimental.
+- **Not built yet (candidates):** real-dApp wallet injection for the browser layer; admin actions
+  (ban / grant credits / revoke sessions); email verification; password reset; deploy walkthrough.
 - **Git:** committed locally; the push to `github.com/xgaming6285/transaction_bullet_proof` is
   pending the owner's interactive GitHub login (the dev machine's cached credential is a different
   account, and the repo may need creating).

@@ -13,13 +13,13 @@
  *      (the Python/Camoufox layer driving a dApp frontend) to push transactions
  *      to the fork. The diff still runs over whatever state changed.
  */
-import { type Address, getAddress } from 'viem';
+import { type Address, getAddress, parseEther } from 'viem';
 import { AnvilFork } from './anvil.js';
 import { config } from './config.js';
 import { makePublicClient, makeWalletClient, testAccount } from './clients.js';
 import { fundWallet } from './wallet.js';
 import { captureSnapshot } from './snapshot.js';
-import { simulateRoundTrip } from './honeypot.js';
+import { simulateRoundTrip, simulateSellOnly } from './honeypot.js';
 import { analyze, diffBalances, diffStorage } from './statediff.js';
 import type { HoneypotReport, RoundTripResult } from './types.js';
 
@@ -76,7 +76,17 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
       if (!opts.externalInteraction) {
         throw new Error("mode 'external' requires an externalInteraction callback");
       }
+      // The browser layer drives a real wallet to BUY the token through a dApp.
       await opts.externalInteraction({ rpcUrl: fork.endpoint, wallet, token });
+      // Then we verify the other half on-chain: are the browser-acquired tokens
+      // sellable? This yields a complete, browser-grounded honeypot verdict.
+      roundTrip = await simulateSellOnly({
+        publicClient,
+        walletClient,
+        wallet,
+        token,
+        ethSpent: parseEther(String(buyEth)),
+      });
     }
 
     // After-interaction snapshot.
