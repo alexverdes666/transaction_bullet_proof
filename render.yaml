@@ -1,0 +1,17 @@
+# Render blueprint for the scan worker.
+# Deploy: push to GitHub, then "New + > Blueprint" in Render and pick this repo.
+services:
+  - type: web
+    name: bulletproof-worker
+    runtime: docker
+    dockerfilePath: ./Dockerfile.worker
+    plan: starter # anvil forks need real CPU/RAM; avoid the free tier for prod
+    healthCheckPath: /health
+    envVars:
+      - key: FORK_RPC_URL
+        sync: false # set a reliable mainnet RPC (Alchemy/Infura key recommended)
+      - key: WORKER_SHARED_SECRET
+        sync: false # must equal the web app's WORKER_SHARED_SECRET
+      - key: BUY_ETH
+        value: "1"
+      # PORT is provided by Render automatically.

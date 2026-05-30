@@ -27,6 +27,20 @@ world — a sandbox — and inside that safe copy it pretends to be a regular sh
 
 Because it all happens in a private practice world, **no real money is ever at risk.**
 
+### How you use it (as easy as 1‑2‑3)
+
+You don't need to understand any of the machinery above. Using Bullet Proof is as simple
+as checking the weather before you leave the house:
+
+1. **Open the website and create your account.** No software to download, no crypto wallet
+   to connect — it runs right in your web browser, on your phone or computer.
+2. **Pick a plan and pay securely.** Once you're in, you can start checking coins.
+3. **Paste the coin's address.** That's the long code starting with `0x` that you copy from
+   wherever the coin is listed (an exchange, a chart site, a friend's message).
+4. **Press "Check."** In a few seconds you get your answer.
+
+That's it. You read the result, and you decide — *before* any of your own money is involved.
+
 ### What you get back
 
 A clear, simple verdict — like a traffic light:
