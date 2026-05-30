@@ -16,6 +16,7 @@
  */
 import {
   type Address,
+  type Hash,
   type PublicClient,
   type WalletClient,
   parseEther,
@@ -23,10 +24,46 @@ import {
 import { config } from './config.js';
 import { erc20Abi, routerAbi } from './abi.js';
 import { balanceOf, readTokenMeta } from './token.js';
-import { extractRevertReason } from './util.js';
+import { extractRevertReason, sleep } from './util.js';
 import type { RoundTripResult } from './types.js';
 
 const MAX_UINT = (1n << 256n) - 1n;
+
+/** How many times to attempt a swap before trusting a revert as real. */
+const TX_ATTEMPTS = 3;
+
+type TxResult =
+  | { ok: true; hash: Hash; gasUsed: bigint }
+  | { ok: false; reason: string };
+
+/**
+ * Send a transaction, retrying on failure.
+ *
+ * This is the key to NOT producing false honeypot verdicts: a reverted tx makes
+ * no state change (the tokens stay in the wallet), so we can safely re-attempt.
+ * A genuine honeypot reverts on EVERY attempt; a transient upstream-RPC hiccup
+ * (anvil lazily fetching fork state mid-call) only fails intermittently. So we
+ * treat a swap as failed only if it reverts on all {@link TX_ATTEMPTS} tries.
+ */
+async function sendTxWithRetry(
+  publicClient: PublicClient,
+  send: () => Promise<Hash>,
+  attempts = TX_ATTEMPTS,
+): Promise<TxResult> {
+  let reason = 'unknown';
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const hash = await send();
+      const receipt = await publicClient.waitForTransactionReceipt({ hash });
+      if (receipt.status === 'success') return { ok: true, hash, gasUsed: receipt.gasUsed };
+      reason = 'transaction reverted on-chain';
+    } catch (err) {
+      reason = extractRevertReason(err);
+    }
+    if (attempt < attempts) await sleep(400 * attempt); // linear backoff
+  }
+  return { ok: false, reason };
+}
 
 interface RoundTripInputs {
   publicClient: PublicClient;
@@ -88,8 +125,8 @@ export async function simulateRoundTrip(inputs: RoundTripInputs): Promise<RoundT
 
   // --- 2. BUY ETH -> token ---------------------------------------------------
   const tokenBefore = await balanceOf(publicClient, token, wallet);
-  try {
-    const hash = await walletClient.writeContract({
+  const buy = await sendTxWithRetry(publicClient, () =>
+    walletClient.writeContract({
       address: router,
       abi: routerAbi,
       functionName: 'swapExactETHForTokensSupportingFeeOnTransferTokens',
@@ -97,18 +134,14 @@ export async function simulateRoundTrip(inputs: RoundTripInputs): Promise<RoundT
       value: buyWei,
       account: walletClient.account!,
       chain: walletClient.chain,
-    });
-    const receipt = await publicClient.waitForTransactionReceipt({ hash });
-    result.buyTxHash = hash;
-    result.buyGasUsed = receipt.gasUsed;
-    if (receipt.status !== 'success') {
-      result.revertReason = 'buy transaction reverted on-chain';
-      return finalize(result);
-    }
-  } catch (err) {
-    result.revertReason = `buy failed: ${extractRevertReason(err)}`;
+    }),
+  );
+  if (!buy.ok) {
+    result.revertReason = `buy failed: ${buy.reason}`;
     return finalize(result);
   }
+  result.buyTxHash = buy.hash;
+  result.buyGasUsed = buy.gasUsed;
 
   const tokenAfterBuy = await balanceOf(publicClient, token, wallet);
   result.tokensReceived = tokenAfterBuy - tokenBefore;
@@ -128,19 +161,19 @@ export async function simulateRoundTrip(inputs: RoundTripInputs): Promise<RoundT
   }
 
   // --- 3. APPROVE router to spend the tokens ---------------------------------
-  try {
-    const approveHash = await walletClient.writeContract({
+  const approve = await sendTxWithRetry(publicClient, () =>
+    walletClient.writeContract({
       address: token,
       abi: erc20Abi,
       functionName: 'approve',
       args: [router, MAX_UINT],
       account: walletClient.account!,
       chain: walletClient.chain,
-    });
-    await publicClient.waitForTransactionReceipt({ hash: approveHash });
-  } catch (err) {
+    }),
+  );
+  if (!approve.ok) {
     // Some honeypots even block approval. Treat as un-sellable.
-    result.revertReason = `approve failed: ${extractRevertReason(err)}`;
+    result.revertReason = `approve failed: ${approve.reason}`;
     return finalize(result);
   }
 
@@ -165,26 +198,24 @@ export async function simulateRoundTrip(inputs: RoundTripInputs): Promise<RoundT
   // but measuring an ERC-20 balance is immune to gas-accounting noise AND to
   // WETH9.withdraw()'s `.transfer` stipend reverting on a fork.
   const wethBefore = await balanceOf(publicClient, weth, wallet);
-  try {
-    const hash = await walletClient.writeContract({
+  const sell = await sendTxWithRetry(publicClient, () =>
+    walletClient.writeContract({
       address: router,
       abi: routerAbi,
       functionName: 'swapExactTokensForTokensSupportingFeeOnTransferTokens',
       args: [tokensToSell, 0n, [...sellPath], wallet, deadline()],
       account: walletClient.account!,
       chain: walletClient.chain,
-    });
-    const receipt = await publicClient.waitForTransactionReceipt({ hash });
-    result.sellTxHash = hash;
-    result.sellGasUsed = receipt.gasUsed;
-    if (receipt.status !== 'success') {
-      result.revertReason = 'sell transaction reverted on-chain (token blocks exits)';
-      return finalize(result);
-    }
-  } catch (err) {
-    result.revertReason = `sell failed: ${extractRevertReason(err)}`;
+    }),
+  );
+  if (!sell.ok) {
+    // Reverted on every attempt -> the token genuinely blocks exits (honeypot),
+    // not a transient RPC blip.
+    result.revertReason = `sell reverted on all ${TX_ATTEMPTS} attempts (token blocks exits): ${sell.reason}`;
     return finalize(result);
   }
+  result.sellTxHash = sell.hash;
+  result.sellGasUsed = sell.gasUsed;
 
   const wethAfter = await balanceOf(publicClient, weth, wallet);
   const tokenAfterSell = await balanceOf(publicClient, token, wallet);
