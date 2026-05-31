@@ -235,6 +235,19 @@ export class AnvilFork {
     await this.rpc('anvil_setBalance', [address, `0x${wei.toString(16)}`]);
   }
 
+  /** Write a raw storage slot of a contract (anvil cheatcode). `value` is a
+   *  32-byte 0x hash. Used to "deal" ourselves an arbitrary ERC-20 balance by
+   *  overwriting the holder's slot in the token's balance mapping. */
+  async setStorageAt(address: string, slot: string, value: string): Promise<void> {
+    await this.rpc('anvil_setStorageAt', [address, slot, value]);
+  }
+
+  /** Revert the fork to a prior EVM snapshot id (anvil cheatcode). Returns true
+   *  on success. Lets us probe a swap and roll back if it reverts. */
+  async revert(snapshotId: Hash): Promise<boolean> {
+    return (await this.rpc('evm_revert', [snapshotId])) === true;
+  }
+
   /** Raw JSON-RPC passthrough for anvil-specific cheatcodes viem doesn't model. */
   async rpc(method: string, params: unknown[]): Promise<unknown> {
     const res = await fetch(this.url, {

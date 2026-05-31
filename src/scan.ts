@@ -27,6 +27,7 @@ import { discoverToken, type TokenInfo, type Discovery } from './discover.js';
 import { fundWallet } from './wallet.js';
 import { captureSnapshotEx } from './snapshot.js';
 import { simulateRoundTrip } from './honeypot.js';
+import { simulatePairRoundTrip } from './pairswap.js';
 import { analyze, diffBalances, diffStorage } from './statediff.js';
 import { runExternalProviders, aggregate } from './providers/ensemble.js';
 import type { ProviderResult } from './providers/types.js';
@@ -153,6 +154,7 @@ async function runSim(
   token: Address,
   buyEth: number,
   chain: ChainConfig,
+  pair: Address | undefined,
 ): Promise<SimOutcome> {
   const ownsFork = !opts.fork;
   const fork = opts.fork ?? new AnvilFork();
@@ -178,15 +180,36 @@ async function runSim(
     });
     const before = beforeCap.snapshot;
 
-    const roundTrip = await simulateRoundTrip({
-      publicClient,
-      walletClient,
-      wallet,
-      token,
-      buyEth,
-      router: chain.router,
-      weth: chain.weth,
-    });
+    // PREFER trading against the token's REAL pool (pair-direct, no hardcoded
+    // router). Fall back to the chain's router only if discovery gave no V2 pair
+    // or the pair-direct attempt can't run (e.g. unfundable/exotic quote token).
+    let roundTrip: RoundTripResult;
+    if (pair) {
+      try {
+        roundTrip = await simulatePairRoundTrip({ fork, publicClient, walletClient, wallet, token, pair });
+      } catch (err) {
+        console.warn(`[scan] pair-direct sim unavailable (${(err as Error).message}); using router fallback`);
+        roundTrip = await simulateRoundTrip({
+          publicClient,
+          walletClient,
+          wallet,
+          token,
+          buyEth,
+          router: chain.router,
+          weth: chain.weth,
+        });
+      }
+    } else {
+      roundTrip = await simulateRoundTrip({
+        publicClient,
+        walletClient,
+        wallet,
+        token,
+        buyEth,
+        router: chain.router,
+        weth: chain.weth,
+      });
+    }
 
     const after = (
       await captureSnapshotEx({
@@ -231,15 +254,18 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
   let chain: ChainConfig | undefined;
   let tokenInfo: TokenInfo | undefined;
   let externalChainId: number | undefined;
+  let pair: Address | undefined;
 
   if (opts.chain) {
     chain = resolveChain(opts.chain);
     externalChainId = chain.chainId;
     tokenInfo = opts.discovery?.info;
+    pair = opts.discovery?.pair;
   } else {
     const discovery = opts.discovery ?? (await discoverToken(token));
     tokenInfo = discovery.info;
     externalChainId = discovery.chainId;
+    pair = discovery.pair;
     if (discovery.chainKey) chain = resolveChain(discovery.chainKey);
   }
 
@@ -250,7 +276,7 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
 
   let sim: SimOutcome | null = null;
   if (chain) {
-    sim = await runSim(opts, token, buyEth, chain).catch((err) => ({
+    sim = await runSim(opts, token, buyEth, chain, pair).catch((err) => ({
       provider: simErrorProvider((err as Error).message),
       roundTrip: null,
       balanceDiff: [],

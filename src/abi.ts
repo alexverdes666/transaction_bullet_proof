@@ -35,6 +35,52 @@ export const erc20Abi = [
     ],
     outputs: [{ type: 'bool' }],
   },
+  {
+    type: 'function',
+    name: 'transfer',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'to', type: 'address' },
+      { name: 'amount', type: 'uint256' },
+    ],
+    outputs: [{ type: 'bool' }],
+  },
+] as const;
+
+/**
+ * Uniswap-V2-style PAIR (the liquidity pool itself). We swap DIRECTLY against the
+ * token's real pool — discovered per-token from DexScreener — instead of routing
+ * through a single hardcoded router per chain. This is what makes the simulation
+ * work on ANY V2-style DEX (Uniswap, PancakeSwap, SushiSwap, Trader Joe, forks…)
+ * without us curating a router address, and it tests the exact pool the user's
+ * token actually trades in. `swap` is the low-level primitive the router wraps.
+ */
+export const pairAbi = [
+  {
+    type: 'function',
+    name: 'getReserves',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [
+      { name: 'reserve0', type: 'uint112' },
+      { name: 'reserve1', type: 'uint112' },
+      { name: 'blockTimestampLast', type: 'uint32' },
+    ],
+  },
+  { type: 'function', name: 'token0', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
+  { type: 'function', name: 'token1', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
+  {
+    type: 'function',
+    name: 'swap',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'amount0Out', type: 'uint256' },
+      { name: 'amount1Out', type: 'uint256' },
+      { name: 'to', type: 'address' },
+      { name: 'data', type: 'bytes' },
+    ],
+    outputs: [],
+  },
 ] as const;
 
 /** Uniswap V2-style router. Covers fee-on-transfer ("supporting fee") variants. */

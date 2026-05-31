@@ -18,6 +18,7 @@ import {
   toHex,
   type PublicClient,
 } from 'viem';
+import type { AnvilFork } from './anvil.js';
 import { erc20Abi } from './abi.js';
 
 export interface TokenMeta {
@@ -99,4 +100,51 @@ export async function findBalanceSlot(
 
 export function zeroSlot(): Hash {
   return pad(toHex(0n), { size: 32 });
+}
+
+/** Vyper lays its `HashMap` out with (slot, key) order, the reverse of Solidity. */
+function vyperBalanceSlotKey(holder: Address, mappingSlot: bigint): Hash {
+  return keccak256(
+    encodeAbiParameters([{ type: 'uint256' }, { type: 'address' }], [mappingSlot, holder]),
+  );
+}
+
+/**
+ * "Deal" `amount` of an ERC-20 to `holder` by overwriting the balance slot
+ * directly on the fork (anvil_setStorageAt) — the same trick Foundry's `deal`
+ * uses. This lets us fund the wallet with the pool's QUOTE token (WETH, USDC,
+ * WBNB, …) so we can buy DIRECTLY from the token's real pair without owning any
+ * of that token or knowing a router.
+ *
+ * The balance mapping's base slot isn't in the ABI, so we brute-force slots
+ * 0..maxSlot under BOTH the Solidity and Vyper layouts: write a probe value, and
+ * accept the first slot where `balanceOf(holder)` reflects it. On no match we
+ * restore what we touched and return null (caller then abstains from the sim).
+ */
+export async function dealToken(
+  fork: AnvilFork,
+  client: PublicClient,
+  token: Address,
+  holder: Address,
+  amount: bigint,
+  maxSlot = 40,
+): Promise<{ mappingSlot: bigint; storageKey: Hash; vyper: boolean } | null> {
+  const value = pad(toHex(amount), { size: 32 });
+  for (let slot = 0n; slot <= BigInt(maxSlot); slot++) {
+    for (const vyper of [false, true]) {
+      const key = vyper ? vyperBalanceSlotKey(holder, slot) : balanceSlotKey(holder, slot);
+      const prev = (await client.getStorageAt({ address: token, slot: key })) ?? zeroSlot();
+      await fork.setStorageAt(token, key, value);
+      let ok = false;
+      try {
+        ok = (await balanceOf(client, token, holder)) === amount;
+      } catch {
+        ok = false;
+      }
+      if (ok) return { mappingSlot: slot, storageKey: key, vyper };
+      // Not the slot — undo our probe write so we don't corrupt unrelated state.
+      await fork.setStorageAt(token, key, prev);
+    }
+  }
+  return null;
 }

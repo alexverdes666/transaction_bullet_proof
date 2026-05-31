@@ -65,6 +65,16 @@ export interface Discovery {
    * Undefined for non-EVM chains or when detection failed.
    */
   chainId?: number;
+  /**
+   * The token's most-liquid V2-style pool on the detected chain. The owned
+   * simulation trades DIRECTLY against this pair (no hardcoded router). Undefined
+   * when DexScreener gave no pair (e.g. RPC-probe detection) or it's V3-only.
+   */
+  pair?: Address;
+  /** DEX the primary pool belongs to (e.g. "uniswap", "pancakeswap"). */
+  dexId?: string;
+  /** DexScreener pair labels (e.g. ["v2"], ["v3"]); used to skip non-V2 pools. */
+  pairLabels?: string[];
   info: TokenInfo;
 }
 
@@ -72,6 +82,8 @@ interface DexPair {
   chainId?: string;
   dexId?: string;
   url?: string;
+  pairAddress?: string;
+  labels?: string[];
   priceUsd?: string;
   liquidity?: { usd?: number };
   fdv?: number;
@@ -227,7 +239,26 @@ export async function discoverToken(address: string): Promise<Discovery> {
         /* enrichment is best-effort */
       }
     }
-    return { chainKey, chainId: chainIdFromDexscreener(detectedDexChain), info };
+
+    // The pool the owned simulation will trade against: the most-liquid pair ON
+    // the detected chain. Prefer an explicit V2 pair (we swap against V2 pools);
+    // a V3-only pool is left undefined so the sim abstains rather than mis-trade.
+    const onChain = pairs.filter((p) => (p.chainId ?? '') === detectedDexChain);
+    const ranked = (onChain.length ? onChain : pairs)
+      .slice()
+      .sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
+    const isV2 = (p: DexPair) => !p.labels?.some((l) => /v3|v4/i.test(l));
+    const primaryPair = ranked.find(isV2) ?? ranked[0];
+    const pair = primaryPair?.pairAddress ? getAddress(primaryPair.pairAddress) : undefined;
+
+    return {
+      chainKey,
+      chainId: chainIdFromDexscreener(detectedDexChain),
+      ...(pair ? { pair } : {}),
+      ...(primaryPair?.dexId ? { dexId: primaryPair.dexId } : {}),
+      ...(primaryPair?.labels ? { pairLabels: primaryPair.labels } : {}),
+      info,
+    };
   }
 
   // --- 2. RPC probe fallback: which supported chain has bytecode? -------------
