@@ -7,6 +7,7 @@
  */
 import type { Address, Hash } from 'viem';
 import type { TokenInfo } from './discover.js';
+import type { ProviderResult } from './providers/types.js';
 
 /** A single ERC-20 / ETH balance reading for the test wallet. */
 export interface BalanceReading {
@@ -104,6 +105,8 @@ export interface HoneypotReport {
   chainName?: string;
   /** Auto-detected metadata about the token (image, price, links, age, …). */
   tokenInfo?: TokenInfo;
+  /** Per-detector breakdown (our sim + GoPlus + honeypot.is) behind the verdict. */
+  sources?: ProviderResult[];
   roundTrip: RoundTripResult | null;
   balanceDiff: BalanceDelta[];
   storageDiff: { label: string; account: Address; slot: Hash; before: Hash; after: Hash }[];

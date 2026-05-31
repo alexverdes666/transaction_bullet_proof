@@ -145,6 +145,81 @@ export const DEXSCREENER_CHAIN_NAMES: Record<string, string> = {
   ton: 'TON',
 };
 
+/**
+ * DexScreener chain slug -> numeric EVM chain id. This is the bridge that lets
+ * the external detectors (GoPlus, honeypot.is) cover chains our own fork doesn't:
+ * detection tells us the slug, this gives the numeric id those APIs key on.
+ *
+ * It's deliberately broad (every chain we've seen DexScreener report that has a
+ * numeric EVM id) and is pure reference data, not a capability gate — adding a
+ * row here costs nothing and never risks a wrong-router false positive, unlike
+ * CHAINS. Non-EVM chains (Solana, Tron, Sui, …) have no numeric id and are
+ * intentionally absent.
+ */
+export const DEXSCREENER_CHAIN_IDS: Record<string, number> = {
+  ethereum: 1,
+  bsc: 56,
+  polygon: 137,
+  base: 8453,
+  arbitrum: 42161,
+  avalanche: 43114,
+  optimism: 10,
+  fantom: 250,
+  cronos: 25,
+  gnosischain: 100,
+  pulsechain: 369,
+  sonic: 146,
+  blast: 81457,
+  linea: 59144,
+  scroll: 534352,
+  mantle: 5000,
+  zksync: 324,
+  celo: 42220,
+  moonbeam: 1284,
+  moonriver: 1285,
+  metis: 1088,
+  core: 1116,
+  opbnb: 204,
+  manta: 169,
+  mode: 34443,
+  kava: 2222,
+  aurora: 1313161554,
+  harmony: 1666600000,
+  fraxtal: 252,
+  unichain: 130,
+  berachain: 80094,
+  worldchain: 480,
+  abstract: 2741,
+  soneium: 1868,
+  story: 1514,
+  monad: 143,
+  hyperliquid: 999,
+  ink: 57073,
+  xlayer: 196,
+  zklinknova: 810180,
+  bitlayer: 200901,
+  merlin: 4200,
+  zircuit: 48900,
+  morph: 2818,
+  gravity: 1625,
+  mint: 185,
+  apechain: 33139,
+  taiko: 167000,
+  zora: 7777777,
+  rootstock: 30,
+  degenchain: 666666666,
+  shibarium: 109,
+  bitkub: 96,
+  oasissapphire: 23294,
+  hashkey: 177,
+};
+
+/** Numeric EVM chain id for a DexScreener slug (for external detectors), or undefined. */
+export function chainIdFromDexscreener(dexChainId: string): number | undefined {
+  const id = dexChainId.toLowerCase();
+  return DEXSCREENER_CHAIN_IDS[id] ?? CHAINS[id]?.chainId;
+}
+
 /** Map a DexScreener chainId string to our registry key, or undefined if we don't simulate it. */
 export function chainKeyFromDexscreener(dexChainId: string): string | undefined {
   const id = dexChainId.toLowerCase();

@@ -23,6 +23,7 @@ import { erc20Abi } from './abi.js';
 import {
   CHAINS,
   chainKeyFromDexscreener,
+  chainIdFromDexscreener,
   displayChainName,
   type ChainConfig,
 } from './chains.js';
@@ -58,6 +59,12 @@ export interface TokenInfo {
 export interface Discovery {
   /** Our registry key for the chain to simulate on, or undefined if we can't. */
   chainKey?: string;
+  /**
+   * Numeric EVM chain id of where the token was detected (even on chains we don't
+   * fork), so the external detectors (GoPlus / honeypot.is) can still run.
+   * Undefined for non-EVM chains or when detection failed.
+   */
+  chainId?: number;
   info: TokenInfo;
 }
 
@@ -220,7 +227,7 @@ export async function discoverToken(address: string): Promise<Discovery> {
         /* enrichment is best-effort */
       }
     }
-    return { chainKey, info };
+    return { chainKey, chainId: chainIdFromDexscreener(detectedDexChain), info };
   }
 
   // --- 2. RPC probe fallback: which supported chain has bytecode? -------------
@@ -233,6 +240,7 @@ export async function discoverToken(address: string): Promise<Discovery> {
     const meta = await readOnchainMeta(hit.c, token).catch(() => ({}));
     return {
       chainKey: hit.c.key,
+      chainId: hit.c.chainId,
       info: {
         detectedVia: 'rpc-probe',
         detectedChainId: hit.c.dexscreenerId,

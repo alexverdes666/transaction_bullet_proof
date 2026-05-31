@@ -52,6 +52,27 @@ const reportSchema = z.object({
   chain: z.string().optional(),
   chainName: z.string().optional(),
   tokenInfo: tokenInfoSchema.optional(),
+  // Ensemble per-detector breakdown (our sim + GoPlus + honeypot.is).
+  sources: z
+    .array(
+      z
+        .object({
+          source: z.string(),
+          label: z.string(),
+          supported: z.boolean(),
+          ok: z.boolean(),
+          isHoneypot: z.boolean().nullable(),
+          buyTax: z.number().nullable(),
+          sellTax: z.number().nullable(),
+          score: z.number().nullable(),
+          weight: z.number().optional(),
+          signals: z.array(z.object({ severity: z.string(), code: z.string(), message: z.string() })).optional(),
+          error: z.string().optional(),
+          durationMs: z.number().optional(),
+        })
+        .passthrough(),
+    )
+    .optional(),
   roundTrip: z.union([z.record(z.unknown()), z.null()]),
   balanceDiff: z.array(z.unknown()),
   storageDiff: z.array(z.unknown()),

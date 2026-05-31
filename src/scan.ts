@@ -1,13 +1,21 @@
 /**
- * High-level scan pipeline. Wires the whole sandbox together for a single
- * target token and returns a fully-formed {@link HoneypotReport}.
+ * High-level scan pipeline — now an ENSEMBLE.
+ *
+ * A single token is judged by several independent detectors and their results
+ * are fused into one verdict:
+ *
+ *   - bulletproof-sim : our own anvil fork buy→sell round-trip (the deep, owned
+ *                       check) — runs only on chains we can fork.
+ *   - goplus          : GoPlus Security static/heuristic analysis — ~40 chains.
+ *   - honeypot.is     : independent live buy/sell simulation — major EVM chains.
+ *
+ * This is what lets Bullet Proof cover essentially any address a user pastes:
+ * even when we can't fork the chain ourselves, the external detectors still vote.
+ * Each detector is fault-isolated — a dead fork RPC or a provider outage degrades
+ * to "one fewer opinion", never a crash or a bogus verdict.
  *
  * Flow:
- *   detect chain (if not given) -> start fork -> fund wallet -> snapshot(before)
- *   -> buy/sell round-trip -> snapshot(after) -> state diff -> analyze -> report
- *
- * The interaction is the deterministic on-chain buy/sell round-trip — the
- * bulletproof core. No browser required.
+ *   detect chain (+ numeric id) -> run [sim ‖ goplus ‖ honeypot.is] -> aggregate
  */
 import { getAddress, type Address, type PublicClient } from 'viem';
 import { AnvilFork } from './anvil.js';
@@ -20,14 +28,15 @@ import { fundWallet } from './wallet.js';
 import { captureSnapshotEx } from './snapshot.js';
 import { simulateRoundTrip } from './honeypot.js';
 import { analyze, diffBalances, diffStorage } from './statediff.js';
-import type { HoneypotReport, RoundTripResult } from './types.js';
+import { runExternalProviders, aggregate } from './providers/ensemble.js';
+import type { ProviderResult } from './providers/types.js';
+import type { Anomaly, BalanceDelta, HoneypotReport, RoundTripResult } from './types.js';
 
 /**
  * Strip credentials/path/query from each comma-separated RPC URL, leaving only
- * the host. FORK_RPC_URL routinely embeds an Alchemy/Infura API key in its path
- * (e.g. https://eth-mainnet.g.alchemy.com/v2/<KEY>); since the web app persists
- * and returns this report verbatim, the key must NEVER appear here. Falls back
- * to 'redacted' for anything we can't parse.
+ * the host. FORK_RPC_URL routinely embeds an Alchemy/Infura API key in its path;
+ * since the web app persists and returns this report verbatim, the key must NEVER
+ * appear here. Falls back to 'redacted' for anything we can't parse.
  */
 function sanitizeRpcUrl(raw: string): string {
   return raw
@@ -83,72 +92,68 @@ async function assertScannableToken(
   } catch {
     throw new Error(
       "This contract doesn't implement the standard ERC-20 balanceOf function, " +
-        `so it is not a token Bullet Proof can scan on ${chainName} (it may be an ` +
-        'NFT or a proxy contract).',
+        `so it is not a token Bullet Proof can simulate on ${chainName} (it may be ` +
+        'an NFT or a proxy contract).',
     );
   }
 }
 
-/** Build a structured ERROR report without running (or needing) a fork. */
-function errorReport(
-  token: Address,
-  message: string,
-  chain: ChainConfig | undefined,
-  tokenInfo: TokenInfo | undefined,
-  started: number,
-): HoneypotReport {
+/** Result of the owned anvil round-trip, packaged for the ensemble + report. */
+interface SimOutcome {
+  provider: ProviderResult;
+  roundTrip: RoundTripResult | null;
+  balanceDiff: BalanceDelta[];
+  storageDiff: HoneypotReport['storageDiff'];
+  blockNumber: string;
+  onchainMeta?: Partial<TokenInfo>;
+}
+
+/** A non-usable sim result (fork died, not an ERC-20, …) — it abstains from the vote. */
+function simErrorProvider(message: string): ProviderResult {
   return {
-    target: token,
-    verdict: 'ERROR',
-    riskScore: 0,
-    summary: `Scan could not complete: ${message}`,
-    ...(chain ? { chain: chain.key, chainName: chain.name } : {}),
-    ...(tokenInfo ? { tokenInfo } : {}),
-    roundTrip: null,
-    balanceDiff: [],
-    storageDiff: [],
-    anomalies: [{ severity: 'critical', code: 'SCAN_ERROR', message }],
-    fork: {
-      rpcUrl: chain ? sanitizeRpcUrl(chain.rpcUrl) : '',
-      blockNumber: '0',
-      chainId: chain?.chainId ?? 0,
-    },
-    durationMs: Date.now() - started,
-    generatedAt: new Date().toISOString(),
+    source: 'bulletproof-sim',
+    label: 'Bullet Proof simulation',
+    supported: true,
+    ok: false,
+    isHoneypot: null,
+    buyTax: null,
+    sellTax: null,
+    score: null,
+    weight: 1.2,
+    signals: [],
+    error: message,
   };
 }
 
-export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
-  const started = Date.now();
-  const token = getAddress(opts.token);
-  const buyEth = opts.buyEth ?? config.wallet.buyEth;
+/** Convert a completed round-trip into a normalized provider vote. */
+function simToProvider(roundTrip: RoundTripResult, anomalies: Anomaly[]): ProviderResult {
+  // The sim only "votes" if it actually got far enough to test sellability — a
+  // token it couldn't even buy is INCONCLUSIVE (never a SAFE signal), so it
+  // abstains and lets the external detectors decide (CLAUDE.md §3).
+  const usable = roundTrip.canBuy;
+  const isHoneypot = roundTrip.canBuy && !roundTrip.canSell ? true : usable ? false : null;
+  return {
+    source: 'bulletproof-sim',
+    label: 'Bullet Proof simulation',
+    supported: true,
+    ok: usable,
+    isHoneypot,
+    buyTax: roundTrip.buyTax >= 0 ? roundTrip.buyTax : null,
+    sellTax: roundTrip.sellTax >= 0 ? roundTrip.sellTax : null,
+    score: null,
+    weight: 1.2, // our own live round-trip is the most trusted voice
+    signals: anomalies.map((a) => ({ severity: a.severity, code: a.code, message: a.message })),
+    ...(usable ? {} : { error: 'token not buyable on the forked DEX — inconclusive' }),
+  };
+}
 
-  // --- Resolve the chain --------------------------------------------------
-  // Manual override wins; otherwise auto-detect (DexScreener + RPC probe).
-  let chain: ChainConfig;
-  let tokenInfo: TokenInfo | undefined;
-  if (opts.chain) {
-    chain = resolveChain(opts.chain);
-    tokenInfo = opts.discovery?.info;
-  } else {
-    const discovery = opts.discovery ?? (await discoverToken(token));
-    tokenInfo = discovery.info;
-    if (!discovery.chainKey) {
-      // Detected somewhere we can't simulate, or not found at all — return a
-      // helpful info-only ERROR (no fork spun).
-      const where = discovery.info.detectedChainName;
-      const msg =
-        discovery.info.detectedVia === 'none'
-          ? "Couldn't find this token on any supported network. Make sure it's a " +
-            'token contract address on Ethereum, BNB Chain, Polygon, Base, Arbitrum or Avalanche.'
-          : `This token was detected on ${where}, which Bullet Proof can't simulate trades ` +
-            'on yet. The info below is what we could gather; the buy/sell honeypot test ' +
-            'is only available on Ethereum, BNB Chain, Polygon, Base, Arbitrum and Avalanche.';
-      return errorReport(token, msg, undefined, tokenInfo, started);
-    }
-    chain = resolveChain(discovery.chainKey);
-  }
-
+/** Run the owned anvil simulation. Throws only on infra failure (caller isolates it). */
+async function runSim(
+  opts: ScanOptions,
+  token: Address,
+  buyEth: number,
+  chain: ChainConfig,
+): Promise<SimOutcome> {
   const ownsFork = !opts.fork;
   const fork = opts.fork ?? new AnvilFork();
   if (ownsFork) await fork.start({ quiet: true, forkUrl: chain.rpcUrl, chainId: chain.chainId });
@@ -160,10 +165,8 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
 
     await assertScannableToken(publicClient, token, chain.name);
 
-    // a. Fund the mock retail wallet with local native gas.
     await fundWallet(fork, wallet);
 
-    // b. Record the "before" snapshot (and a revertible EVM checkpoint).
     const beforeCap = await captureSnapshotEx({
       fork,
       client: publicClient,
@@ -175,8 +178,7 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
     });
     const before = beforeCap.snapshot;
 
-    // c. Drive the deterministic on-chain buy/sell round-trip.
-    const roundTrip: RoundTripResult = await simulateRoundTrip({
+    const roundTrip = await simulateRoundTrip({
       publicClient,
       walletClient,
       wallet,
@@ -186,7 +188,6 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
       weth: chain.weth,
     });
 
-    // After-interaction snapshot (reuse the discovered balance slot — PERF-1).
     const after = (
       await captureSnapshotEx({
         fork,
@@ -199,51 +200,164 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
       })
     ).snapshot;
 
-    // Enrich tokenInfo with on-chain name/symbol/decimals when discovery didn't
-    // already provide them (e.g. manual chain override with no DexScreener data).
-    if (!tokenInfo || !tokenInfo.symbol) {
-      const onchain = await readOnchainMeta(publicClient, token);
-      tokenInfo = {
-        detectedVia: tokenInfo?.detectedVia ?? 'rpc-probe',
-        detectedChainId: chain.dexscreenerId,
-        detectedChainName: chain.name,
-        explorerUrl: `${chain.explorer}/token/${token}`,
-        ...onchain,
-        ...tokenInfo,
-      };
-    }
+    const onchainMeta = await readOnchainMeta(publicClient, token).catch(() => undefined);
 
-    // d. Strict state diff.
     const balanceDiff = diffBalances(before, after);
     const storageDiff = diffStorage(before, after);
-    const { anomalies, riskScore, verdict } = analyze(roundTrip, storageDiff);
+    const { anomalies } = analyze(roundTrip, storageDiff);
 
-    const report: HoneypotReport = {
-      target: token,
-      verdict,
-      riskScore,
-      summary: summarize(verdict, riskScore, roundTrip),
-      chain: chain.key,
-      chainName: chain.name,
-      ...(tokenInfo ? { tokenInfo } : {}),
+    return {
+      provider: simToProvider(roundTrip, anomalies),
       roundTrip,
       balanceDiff,
       storageDiff,
-      anomalies,
-      fork: {
-        rpcUrl: sanitizeRpcUrl(chain.rpcUrl),
-        blockNumber: before.blockNumber.toString(),
-        chainId: chain.chainId,
-      },
-      durationMs: Date.now() - started,
-      generatedAt: new Date().toISOString(),
+      blockNumber: before.blockNumber.toString(),
+      ...(onchainMeta ? { onchainMeta } : {}),
     };
-    return report;
-  } catch (err) {
-    return errorReport(token, (err as Error).message, chain, tokenInfo, started);
   } finally {
     if (ownsFork) await fork.stop();
   }
+}
+
+export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
+  const started = Date.now();
+  const token = getAddress(opts.token);
+  const buyEth = opts.buyEth ?? config.wallet.buyEth;
+
+  // --- Resolve the chain --------------------------------------------------
+  // Manual override wins; otherwise auto-detect (DexScreener + RPC probe). We
+  // keep BOTH the forkable ChainConfig (if any) and the numeric chain id (which
+  // may exist even for chains we can't fork — that's what powers the externals).
+  let chain: ChainConfig | undefined;
+  let tokenInfo: TokenInfo | undefined;
+  let externalChainId: number | undefined;
+
+  if (opts.chain) {
+    chain = resolveChain(opts.chain);
+    externalChainId = chain.chainId;
+    tokenInfo = opts.discovery?.info;
+  } else {
+    const discovery = opts.discovery ?? (await discoverToken(token));
+    tokenInfo = discovery.info;
+    externalChainId = discovery.chainId;
+    if (discovery.chainKey) chain = resolveChain(discovery.chainKey);
+  }
+
+  // --- Run every applicable detector concurrently -------------------------
+  const externalP: Promise<ProviderResult[]> = externalChainId
+    ? runExternalProviders(token, externalChainId, started)
+    : Promise.resolve([]);
+
+  let sim: SimOutcome | null = null;
+  if (chain) {
+    sim = await runSim(opts, token, buyEth, chain).catch((err) => ({
+      provider: simErrorProvider((err as Error).message),
+      roundTrip: null,
+      balanceDiff: [],
+      storageDiff: [],
+      blockNumber: '0',
+    }));
+  }
+
+  const external = await externalP;
+  const sources: ProviderResult[] = [];
+  if (sim) sources.push(sim.provider);
+  sources.push(...external);
+
+  // Fill thin tokenInfo with on-chain name/symbol/decimals from the sim probe.
+  if (sim?.onchainMeta && (!tokenInfo || !tokenInfo.symbol)) {
+    tokenInfo = {
+      detectedVia: tokenInfo?.detectedVia ?? 'rpc-probe',
+      ...(chain ? { detectedChainId: chain.dexscreenerId, detectedChainName: chain.name, explorerUrl: `${chain.explorer}/token/${token}` } : {}),
+      ...sim.onchainMeta,
+      ...tokenInfo,
+    };
+  }
+
+  // --- Aggregate ----------------------------------------------------------
+  const agg = aggregate(sources);
+  const chainName = chain?.name ?? tokenInfo?.detectedChainName;
+
+  if (agg.usableCount === 0) {
+    // No detector could judge it — return a helpful info-only ERROR (no verdict).
+    const msg = noVerdictMessage(tokenInfo, chainName);
+    return errorReport(token, msg, chain, tokenInfo, started, sources, chainName, externalChainId);
+  }
+
+  const roundTrip = sim?.roundTrip ?? null;
+  return {
+    target: token,
+    verdict: agg.verdict,
+    riskScore: agg.riskScore,
+    summary: summarize(agg, sources, roundTrip),
+    ...(chain ? { chain: chain.key } : {}),
+    ...(chainName ? { chainName } : {}),
+    ...(tokenInfo ? { tokenInfo } : {}),
+    sources,
+    roundTrip,
+    balanceDiff: sim?.balanceDiff ?? [],
+    storageDiff: sim?.storageDiff ?? [],
+    anomalies: agg.anomalies,
+    fork: {
+      rpcUrl: chain ? sanitizeRpcUrl(chain.rpcUrl) : '',
+      blockNumber: sim?.blockNumber ?? '0',
+      chainId: chain?.chainId ?? externalChainId ?? 0,
+    },
+    durationMs: Date.now() - started,
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+/** Build a structured ERROR report without a usable verdict. */
+function errorReport(
+  token: Address,
+  message: string,
+  chain: ChainConfig | undefined,
+  tokenInfo: TokenInfo | undefined,
+  started: number,
+  sources: ProviderResult[],
+  chainName: string | undefined,
+  externalChainId: number | undefined,
+): HoneypotReport {
+  return {
+    target: token,
+    verdict: 'ERROR',
+    riskScore: 0,
+    summary: `Scan could not complete: ${message}`,
+    ...(chain ? { chain: chain.key } : {}),
+    ...(chainName ? { chainName } : {}),
+    ...(tokenInfo ? { tokenInfo } : {}),
+    sources,
+    roundTrip: null,
+    balanceDiff: [],
+    storageDiff: [],
+    anomalies: [{ severity: 'critical', code: 'SCAN_ERROR', message }],
+    fork: {
+      rpcUrl: chain ? sanitizeRpcUrl(chain.rpcUrl) : '',
+      blockNumber: '0',
+      chainId: chain?.chainId ?? externalChainId ?? 0,
+    },
+    durationMs: Date.now() - started,
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+/** Message for the no-usable-verdict case (non-EVM chain, not found, all providers down). */
+function noVerdictMessage(tokenInfo: TokenInfo | undefined, chainName: string | undefined): string {
+  if (!tokenInfo || tokenInfo.detectedVia === 'none') {
+    return (
+      "Couldn't find this token on any supported network. Make sure it's a token " +
+      'contract address (not a wallet) on an EVM chain.'
+    );
+  }
+  if (chainName) {
+    return (
+      `This token was detected on ${chainName}, but none of our detectors could ` +
+      'analyze it right now (the chain may be non-EVM or temporarily unavailable). ' +
+      'The info below is what we could gather.'
+    );
+  }
+  return 'No security detector could analyze this token right now. The info below is what we could gather.';
 }
 
 /** Lightweight on-chain ERC-20 read used to fill tokenInfo when discovery was thin. */
@@ -263,18 +377,15 @@ async function readOnchainMeta(client: PublicClient, token: Address): Promise<Pa
 }
 
 function summarize(
-  verdict: HoneypotReport['verdict'],
-  score: number,
+  agg: ReturnType<typeof aggregate>,
+  sources: ProviderResult[],
   rt: RoundTripResult | null,
 ): string {
-  if (verdict === 'ERROR') return 'Scan could not complete.';
-  const parts = [`Verdict: ${verdict} (risk ${score}/100).`];
-  if (rt) {
-    parts.push(rt.canBuy ? 'Token is buyable.' : 'Token is NOT buyable on the configured router.');
-    if (rt.canBuy) {
-      parts.push(rt.canSell ? 'Token is sellable.' : 'Token is NOT sellable (sell reverts).');
-    }
-    if (rt.canSell && rt.sellTax >= 0) parts.push(`Sell tax ~${(rt.sellTax * 100).toFixed(1)}%.`);
-  }
+  if (agg.verdict === 'ERROR') return 'Scan could not complete.';
+  const parts = [`Verdict: ${agg.verdict} (risk ${agg.riskScore}/100).`];
+  if (rt && rt.canBuy && !rt.canSell) parts.push('Our live simulation could BUY but NOT sell this token.');
+  if (agg.sellTax != null) parts.push(`Sell tax ~${(agg.sellTax * 100).toFixed(1)}%.`);
+  const checked = sources.filter((s) => s.ok).map((s) => s.label);
+  if (checked.length) parts.push(`Checked by ${checked.join(', ')}.`);
   return parts.join(' ');
 }
