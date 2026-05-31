@@ -26,7 +26,7 @@ export async function POST(req: NextRequest) {
       return fail('Slow down — too many scans per minute.', 429);
     }
 
-    const { token } = scanSchema.parse(await req.json());
+    const { token, chain } = scanSchema.parse(await req.json());
     await connectDb();
 
     // PAYWALL: atomically spend one credit. The `credits > 0` guard makes this
@@ -43,7 +43,7 @@ export async function POST(req: NextRequest) {
 
     let report;
     try {
-      report = await runScanOnWorker(token);
+      report = await runScanOnWorker(token, chain);
     } catch (e) {
       // Infra failure is not the user's fault — refund the credit. Mirror the
       // spend's `status: 'active'` guard so a banned user isn't re-credited.
@@ -57,13 +57,14 @@ export async function POST(req: NextRequest) {
     await Scan.create({
       userId: user.id,
       token,
+      chain: chain ?? 'ethereum',
       verdict: report.verdict,
       riskScore: report.riskScore,
       summary: report.summary,
       report,
       durationMs: report.durationMs,
     });
-    await audit({ type: 'scan', ctx, userId: user.id, detail: { token, verdict: report.verdict, risk: report.riskScore } });
+    await audit({ type: 'scan', ctx, userId: user.id, detail: { token, chain: chain ?? 'ethereum', verdict: report.verdict, risk: report.riskScore } });
 
     return json({ ok: true, report, creditsRemaining: spent.credits });
   } catch (e) {
