@@ -82,7 +82,10 @@ function fmtSupply(raw?: string, decimals?: number, symbol?: string): string | n
   if (!raw) return null;
   try {
     const d = decimals ?? 18;
-    const v = Number(BigInt(raw) / (d > 0 ? 10n ** BigInt(d) : 1n));
+    // Avoid bigint LITERALS (10n/1n): Next's tsc targets ES2017 and rejects them
+    // at type-check (CLAUDE.md §5.5). BigInt(...) is fine at runtime/type level.
+    const divisor = d > 0 ? BigInt(10) ** BigInt(d) : BigInt(1);
+    const v = Number(BigInt(raw) / divisor);
     if (!Number.isFinite(v)) return null;
     const s = v >= 1e9 ? `${(v / 1e9).toFixed(2)}B` : v >= 1e6 ? `${(v / 1e6).toFixed(2)}M` : v.toLocaleString();
     return symbol ? `${s} ${symbol}` : s;
