@@ -25,6 +25,11 @@ export interface SnapshotInputs {
    * discovery pass entirely.
    */
   knownSlot?: { mappingSlot: bigint; storageKey: Hash } | null;
+  /**
+   * Wrapped-native token to also track (the round-trip sell delivers proceeds as
+   * wrapped-native). Per-chain; defaults to the env Ethereum WETH when omitted.
+   */
+  weth?: Address;
 }
 
 /**
@@ -54,9 +59,10 @@ export async function captureSnapshotEx(inputs: SnapshotInputs): Promise<Capture
 
   const meta = await readTokenMeta(client, token);
 
-  // Also track WETH: the round-trip sell delivers proceeds as WETH, so including
-  // it makes the balance diff tell the whole story (ETH out, WETH in, token net).
-  const weth = config.dex.weth;
+  // Also track wrapped-native: the round-trip sell delivers proceeds as
+  // wrapped-native, so including it makes the balance diff tell the whole story
+  // (native out, wrapped-native in, token net). Per-chain; defaults to env WETH.
+  const weth = inputs.weth ?? config.dex.weth;
   const trackWeth = weth.toLowerCase() !== token.toLowerCase();
   const [ethWei, tokenRaw, wethRaw] = await Promise.all([
     client.getBalance({ address: wallet }),

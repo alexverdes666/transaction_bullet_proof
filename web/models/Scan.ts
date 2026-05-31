@@ -5,6 +5,9 @@ import { Schema, model, models, type InferSchemaType, type Model } from 'mongoos
 const scanSchema = new Schema({
   userId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
   token: { type: String, required: true, index: true },
+  // Chain the scan ran on (e.g. "ethereum", "bsc"). Defaults to ethereum for
+  // rows written before multi-chain support.
+  chain: { type: String, default: 'ethereum' },
   verdict: { type: String, enum: ['SAFE', 'SUSPICIOUS', 'HONEYPOT', 'ERROR'], required: true },
   riskScore: { type: Number, default: 0 },
   summary: String,

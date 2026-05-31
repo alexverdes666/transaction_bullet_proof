@@ -40,12 +40,15 @@ function findFreePort(): Promise<number> {
 }
 
 export interface AnvilStartOptions {
-  /** Override the upstream fork URL. */
+  /** Override the upstream fork URL (comma-separated list for failover). */
   forkUrl?: string;
   /** Pin the fork to a specific block for reproducibility. */
   blockNumber?: bigint;
   /** Suppress anvil's stdout. Defaults to true (we only surface our own logs). */
   quiet?: boolean;
+  /** Chain id for anvil's --chain-id. Must match the forked chain so signed txs
+   *  are accepted and block.chainid reads correctly. Defaults to env config. */
+  chainId?: number;
 }
 
 /**
@@ -141,7 +144,7 @@ export class AnvilFork {
     const args = [
       '--fork-url', forkUrl,
       '--port', String(this.port),
-      '--chain-id', String(config.fork.chainId),
+      '--chain-id', String(opts.chainId ?? config.fork.chainId),
       // Resilience against flaky free RPCs: anvil fetches fork state lazily, so a
       // single dropped upstream request mid-transaction can otherwise surface as
       // a spurious "revert" and a FALSE honeypot verdict. These make anvil itself

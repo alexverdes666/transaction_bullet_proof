@@ -25,8 +25,26 @@ export const addressSchema = z
   .trim()
   .refine((v) => isAddress(v), 'Invalid contract address');
 
+/**
+ * Chains the scan engine supports. MUST stay in sync with src/chains.ts (the
+ * engine re-validates, so a drift just means a clean 400 here vs there). `key`
+ * is what the API/worker expect; `name`/`native` drive the UI selector.
+ */
+export const SUPPORTED_CHAINS = [
+  { key: 'ethereum', name: 'Ethereum', native: 'ETH' },
+  { key: 'bsc', name: 'BNB Smart Chain', native: 'BNB' },
+  { key: 'polygon', name: 'Polygon', native: 'POL' },
+  { key: 'base', name: 'Base', native: 'ETH' },
+  { key: 'arbitrum', name: 'Arbitrum One', native: 'ETH' },
+  { key: 'avalanche', name: 'Avalanche C-Chain', native: 'AVAX' },
+] as const;
+
+export const CHAIN_KEYS = SUPPORTED_CHAINS.map((c) => c.key) as [string, ...string[]];
+
 export const scanSchema = z.object({
   token: addressSchema,
+  // Optional; defaults to ethereum engine-side. Constrained to supported keys.
+  chain: z.enum(CHAIN_KEYS).optional(),
 });
 
 export const createOrderSchema = z.object({

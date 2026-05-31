@@ -8,6 +8,16 @@ import Link from 'next/link';
 // full browser refresh — it stays visible until the next scan replaces it.
 const LAST_SCAN_KEY = 'bp_last_scan';
 
+// Chains the engine supports (keep in sync with web/lib/validation.ts).
+const CHAINS = [
+  { key: 'ethereum', name: 'Ethereum' },
+  { key: 'bsc', name: 'BNB Smart Chain' },
+  { key: 'polygon', name: 'Polygon' },
+  { key: 'base', name: 'Base' },
+  { key: 'arbitrum', name: 'Arbitrum One' },
+  { key: 'avalanche', name: 'Avalanche C-Chain' },
+] as const;
+
 interface Report {
   verdict: 'SAFE' | 'SUSPICIOUS' | 'HONEYPOT' | 'ERROR';
   riskScore: number;
@@ -38,6 +48,7 @@ export default function ScanForm({ initialCredits }: { initialCredits: number })
   const [scannedToken, setScannedToken] = useState('');
   const [credits, setCredits] = useState(initialCredits);
   const [noCredits, setNoCredits] = useState(false);
+  const [chain, setChain] = useState('ethereum');
 
   // Restore the last result on mount so it survives a router.refresh() remount
   // or a full page refresh.
@@ -74,7 +85,7 @@ export default function ScanForm({ initialCredits }: { initialCredits: number })
     const res = await fetch('/api/scan', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ token: trimmed }),
+      body: JSON.stringify({ token: trimmed, chain }),
     });
     const j = await res.json().catch(() => ({}));
     setBusy(false);
@@ -103,6 +114,23 @@ export default function ScanForm({ initialCredits }: { initialCredits: number })
   return (
     <div className="space-y-6">
       <form onSubmit={scan} className="space-y-3">
+        <div>
+          <label htmlFor="scan-chain" className="block text-xs text-neutral-300 mb-1">Network</label>
+          <select
+            id="scan-chain"
+            name="chain"
+            value={chain}
+            onChange={(e) => setChain(e.target.value)}
+            className="w-full rounded-lg bg-neutral-900 border border-neutral-700 px-4 py-3 text-sm outline-none focus:border-emerald-500"
+          >
+            {CHAINS.map((c) => (
+              <option key={c.key} value={c.key}>{c.name}</option>
+            ))}
+          </select>
+          <p className="mt-1 text-xs text-neutral-400">
+            Pick the chain the token is deployed on. Wrong network → &ldquo;not a token&rdquo;.
+          </p>
+        </div>
         <label htmlFor="scan-token" className="sr-only">Token contract address</label>
         <input
           id="scan-token"

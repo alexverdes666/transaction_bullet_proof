@@ -22,7 +22,6 @@ import {
   maxUint256,
   parseEther,
 } from 'viem';
-import { config } from './config.js';
 import { erc20Abi, routerAbi } from './abi.js';
 import { balanceOf, readTokenMeta } from './token.js';
 import { extractRevertReason, sleep } from './util.js';
@@ -95,6 +94,10 @@ interface RoundTripInputs {
   token: Address;
   /** ETH to spend on the buy (in ETH units). */
   buyEth: number;
+  /** Uniswap-V2-style router for this chain. */
+  router: Address;
+  /** Wrapped-native token for this chain (WETH/WBNB/…). */
+  weth: Address;
 }
 
 /** A far-future deadline so swaps never fail on the timestamp check. */
@@ -103,8 +106,7 @@ function deadline(): bigint {
 }
 
 export async function simulateRoundTrip(inputs: RoundTripInputs): Promise<RoundTripResult> {
-  const { publicClient, walletClient, wallet, token, buyEth } = inputs;
-  const { router, weth } = config.dex;
+  const { publicClient, walletClient, wallet, token, buyEth, router, weth } = inputs;
   const meta = await readTokenMeta(publicClient, token);
 
   const result: RoundTripResult = {

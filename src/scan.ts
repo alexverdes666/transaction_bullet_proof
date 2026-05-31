@@ -14,6 +14,7 @@ import { AnvilFork } from './anvil.js';
 import { config } from './config.js';
 import { makePublicClient, makeWalletClient, testAccount } from './clients.js';
 import { erc20Abi } from './abi.js';
+import { resolveChain } from './chains.js';
 import { fundWallet } from './wallet.js';
 import { captureSnapshotEx } from './snapshot.js';
 import { simulateRoundTrip } from './honeypot.js';
@@ -45,26 +46,34 @@ function sanitizeRpcUrl(raw: string): string {
 export interface ScanOptions {
   token: string;
   buyEth?: number;
+  /** Chain key (e.g. "ethereum", "bsc"). Defaults to Ethereum. */
+  chain?: string;
   /** Reuse an already-running fork instead of spawning a new one. */
   fork?: AnvilFork;
 }
 
 /**
- * Fail fast with a plain-English reason when the address isn't a scannable
- * Ethereum-mainnet ERC-20, instead of surfacing a raw viem error
- * ("balanceOf returned no data (0x)…") deep from captureSnapshot. The two common
- * cases: a non-contract address (a wallet, or a token that only exists on
- * another chain — BSC/Base/Polygon/Solana), and a contract that doesn't
- * implement ERC-20 balanceOf (an NFT, a proxy, etc.). Thrown errors flow through
- * runScan's catch into a clean ERROR report.
+ * Fail fast with a plain-English reason when the address isn't a scannable ERC-20
+ * on the selected chain, instead of surfacing a raw viem error ("balanceOf
+ * returned no data (0x)…") deep from captureSnapshot. The two common cases: a
+ * non-contract address (a wallet, or a token that lives on a DIFFERENT chain than
+ * the one selected), and a contract that doesn't implement ERC-20 balanceOf (an
+ * NFT, a proxy, etc.). Thrown errors flow through runScan's catch into a clean
+ * ERROR report. `chainName` names the chain we actually forked, so the message
+ * tells the user where we looked.
  */
-async function assertScannableToken(client: PublicClient, token: Address): Promise<void> {
+async function assertScannableToken(
+  client: PublicClient,
+  token: Address,
+  chainName: string,
+): Promise<void> {
   const code = await client.getCode({ address: token });
   if (!code || code === '0x') {
     throw new Error(
-      'Not a token contract on Ethereum mainnet. This looks like a wallet ' +
-        'address, or a token that only exists on another chain (BSC, Base, ' +
-        'Polygon, Solana…). Bullet Proof only scans Ethereum-mainnet ERC-20 tokens.',
+      `Not a token contract on ${chainName}. This looks like a wallet address, ` +
+        'or a token deployed on a different chain. Pick the correct network for ' +
+        'this address (Bullet Proof supports Ethereum, BNB Chain, Polygon, Base, ' +
+        'Arbitrum and Avalanche).',
     );
   }
   try {
@@ -77,8 +86,8 @@ async function assertScannableToken(client: PublicClient, token: Address): Promi
   } catch {
     throw new Error(
       "This contract doesn't implement the standard ERC-20 balanceOf function, " +
-        'so it is not a token Bullet Proof can scan (it may be an NFT, a proxy ' +
-        'contract, or a token on another chain).',
+        `so it is not a token Bullet Proof can scan on ${chainName} (it may be an ` +
+        'NFT, a proxy contract, or a token on another chain).',
     );
   }
 }
@@ -87,19 +96,24 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
   const started = Date.now();
   const token = getAddress(opts.token);
   const buyEth = opts.buyEth ?? config.wallet.buyEth;
+  // Resolve the target chain (throws on an unsupported key). All chain-specific
+  // values — fork RPC, DEX router, wrapped-native, reported chainId — come from here.
+  const chain = resolveChain(opts.chain);
 
   const ownsFork = !opts.fork;
+  // When we own the fork, point it at the resolved chain's RPC. When the caller
+  // supplies a fork (worker path) it was already started for this chain.
   const fork = opts.fork ?? new AnvilFork();
-  if (ownsFork) await fork.start({ quiet: true });
+  if (ownsFork) await fork.start({ quiet: true, forkUrl: chain.rpcUrl, chainId: chain.chainId });
 
   try {
-    const publicClient = makePublicClient(fork.endpoint);
-    const walletClient = makeWalletClient(fork.endpoint);
+    const publicClient = makePublicClient(fork.endpoint, chain.chainId, chain.nativeSymbol);
+    const walletClient = makeWalletClient(fork.endpoint, chain.chainId, chain.nativeSymbol);
     const wallet = testAccount.address;
 
-    // Reject non-mainnet / non-ERC-20 addresses up front with a clear message,
+    // Reject wrong-chain / non-ERC-20 addresses up front with a clear message,
     // rather than letting balanceOf fail with a raw viem dump mid-pipeline.
-    await assertScannableToken(publicClient, token);
+    await assertScannableToken(publicClient, token, chain.name);
 
     // a. Fund the mock retail wallet with local ETH.
     await fundWallet(fork, wallet);
@@ -112,6 +126,7 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
       token,
       label: 'before-interaction',
       takeEvmSnapshot: true,
+      weth: chain.weth,
     });
     const before = beforeCap.snapshot;
 
@@ -122,6 +137,8 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
       wallet,
       token,
       buyEth,
+      router: chain.router,
+      weth: chain.weth,
     });
 
     // After-interaction snapshot. PERF-1: if the before-snapshot already located
@@ -137,6 +154,7 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
         wallet,
         token,
         label: 'after-interaction',
+        weth: chain.weth,
         ...(beforeCap.slot ? { knownSlot: beforeCap.slot } : {}),
       })
     ).snapshot;
@@ -156,9 +174,9 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
       storageDiff,
       anomalies,
       fork: {
-        rpcUrl: sanitizeRpcUrl(config.fork.rpcUrl),
+        rpcUrl: sanitizeRpcUrl(chain.rpcUrl),
         blockNumber: before.blockNumber.toString(),
-        chainId: config.fork.chainId,
+        chainId: chain.chainId,
       },
       durationMs: Date.now() - started,
       generatedAt: new Date().toISOString(),
@@ -178,9 +196,9 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
         { severity: 'critical', code: 'SCAN_ERROR', message: (err as Error).message },
       ],
       fork: {
-        rpcUrl: sanitizeRpcUrl(config.fork.rpcUrl),
+        rpcUrl: sanitizeRpcUrl(chain.rpcUrl),
         blockNumber: '0',
-        chainId: config.fork.chainId,
+        chainId: chain.chainId,
       },
       durationMs: Date.now() - started,
       generatedAt: new Date().toISOString(),

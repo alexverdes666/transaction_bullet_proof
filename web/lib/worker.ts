@@ -43,7 +43,7 @@ const reportSchema = z.object({
 
 export type HoneypotReport = z.infer<typeof reportSchema>;
 
-export async function runScanOnWorker(token: string): Promise<HoneypotReport> {
+export async function runScanOnWorker(token: string, chain?: string): Promise<HoneypotReport> {
   const controller = new AbortController();
   // Nest under the scan route's maxDuration (120s) and above the worker's own
   // internal budget, so the web side aborts cleanly before the platform kills us.
@@ -55,7 +55,7 @@ export async function runScanOnWorker(token: string): Promise<HoneypotReport> {
         'content-type': 'application/json',
         'x-worker-secret': env.workerSecret,
       },
-      body: JSON.stringify({ token }),
+      body: JSON.stringify({ token, ...(chain ? { chain } : {}) }),
       signal: controller.signal,
       cache: 'no-store',
     });

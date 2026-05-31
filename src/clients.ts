@@ -23,24 +23,45 @@ import { config } from './config.js';
 /** The deterministic anvil dev account (its private key is baked into every fork). */
 export const testAccount = privateKeyToAccount(config.wallet.privateKey);
 
-/** Build a viem chain definition for a fork reachable at `endpoint`. */
-export function makeForkChain(endpoint: string): Chain {
+/**
+ * Build a viem chain definition for a fork reachable at `endpoint`.
+ *
+ * `chainId`/`nativeSymbol` must match the forked chain (and anvil's --chain-id)
+ * so EIP-155 tx signing is accepted by the fork and `block.chainid` reads
+ * correctly for any contract that checks it. Defaults to the env Ethereum config.
+ */
+export function makeForkChain(
+  endpoint: string,
+  chainId: number = config.fork.chainId,
+  nativeSymbol = 'ETH',
+): Chain {
   return defineChain({
-    id: config.fork.chainId,
+    id: chainId,
     name: 'anvil-fork',
-    nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+    nativeCurrency: { name: nativeSymbol, symbol: nativeSymbol, decimals: 18 },
     rpcUrls: { default: { http: [endpoint] } },
   });
 }
 
-export function makePublicClient(endpoint: string): PublicClient {
-  return createPublicClient({ chain: makeForkChain(endpoint), transport: http(endpoint) });
+export function makePublicClient(
+  endpoint: string,
+  chainId?: number,
+  nativeSymbol?: string,
+): PublicClient {
+  return createPublicClient({
+    chain: makeForkChain(endpoint, chainId, nativeSymbol),
+    transport: http(endpoint),
+  });
 }
 
-export function makeWalletClient(endpoint: string): WalletClient {
+export function makeWalletClient(
+  endpoint: string,
+  chainId?: number,
+  nativeSymbol?: string,
+): WalletClient {
   return createWalletClient({
     account: testAccount,
-    chain: makeForkChain(endpoint),
+    chain: makeForkChain(endpoint, chainId, nativeSymbol),
     transport: http(endpoint),
   });
 }
