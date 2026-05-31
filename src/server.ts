@@ -17,6 +17,7 @@ import { isAddress } from 'viem';
 import { config } from './config.js';
 import { runScan } from './scan.js';
 import { stopAllForks } from './anvil.js';
+import { isSupportedChain, resolveChain, CHAINS } from './chains.js';
 import { jsonSafe } from './util.js';
 
 // Shared secret gating /scan. Set in production (Render); when present it is
@@ -94,8 +95,14 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
  * stopped on every exit path, including the timeout branch where start() may not
  * even have completed (stop() is a safe no-op on a fork that never started).
  */
-async function runScanWithTimeout(token: string, buyEth: number | undefined) {
+async function runScanWithTimeout(
+  token: string,
+  buyEth: number | undefined,
+  chain: string | undefined,
+) {
   const { AnvilFork } = await import('./anvil.js');
+  // Resolve the chain (defaults to Ethereum); its RPC + chainId drive the fork.
+  const resolved = resolveChain(chain);
   const fork = new AnvilFork();
 
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -108,8 +115,13 @@ async function runScanWithTimeout(token: string, buyEth: number | undefined) {
 
   // start() + runScan() as one awaitable so the single deadline bounds the lot.
   const work = (async () => {
-    await fork.start({ quiet: true });
-    return runScan({ token, fork, ...(buyEth !== undefined ? { buyEth } : {}) });
+    await fork.start({ quiet: true, forkUrl: resolved.rpcUrl, chainId: resolved.chainId });
+    return runScan({
+      token,
+      fork,
+      ...(chain !== undefined ? { chain } : {}),
+      ...(buyEth !== undefined ? { buyEth } : {}),
+    });
   })();
 
   try {
@@ -213,6 +225,16 @@ const server = createServer(async (req, res) => {
       if (!isAddress(token)) {
         return send(res, 400, { error: 'invalid or missing "token" address' });
       }
+      // Validate the optional chain against the supported registry; default = ethereum.
+      let chain: string | undefined;
+      if (body['chain'] !== undefined && body['chain'] !== '') {
+        chain = String(body['chain']).toLowerCase();
+        if (!isSupportedChain(chain)) {
+          return send(res, 400, {
+            error: `unsupported "chain". Supported: ${Object.keys(CHAINS).join(', ')}`,
+          });
+        }
+      }
       // SEC-9: validate/clamp buyEth to a sane positive range; 400 otherwise.
       let buyEth: number | undefined;
       if (body['buyEth'] !== undefined) {
@@ -222,10 +244,10 @@ const server = createServer(async (req, res) => {
         }
       }
 
-      console.log(`[server] scan request: ${token}`);
+      console.log(`[server] scan request: ${token} on ${chain ?? 'ethereum'}`);
       activeScans++;
       try {
-        const report = await runScanWithTimeout(token, buyEth);
+        const report = await runScanWithTimeout(token, buyEth, chain);
         return send(res, 200, report);
       } finally {
         activeScans--;
