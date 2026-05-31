@@ -17,11 +17,41 @@ import { env } from './env';
  * (so a new label never rejects a valid report) and nested `roundTrip` /
  * `fork` shapes are passthrough objects.
  */
+const tokenInfoSchema = z
+  .object({
+    name: z.string().optional(),
+    symbol: z.string().optional(),
+    decimals: z.number().optional(),
+    totalSupply: z.string().optional(),
+    imageUrl: z.string().optional(),
+    priceUsd: z.string().optional(),
+    liquidityUsd: z.number().optional(),
+    fdv: z.number().optional(),
+    marketCap: z.number().optional(),
+    pairCreatedAt: z.number().optional(),
+    dexId: z.string().optional(),
+    pairUrl: z.string().optional(),
+    websites: z.array(z.string()).optional(),
+    socials: z.array(z.object({ type: z.string(), url: z.string() })).optional(),
+    detectedChainName: z.string().optional(),
+    detectedChainId: z.string().optional(),
+    detectedVia: z.string().optional(),
+    explorerUrl: z.string().optional(),
+    tradesOn: z
+      .array(z.object({ chain: z.string(), chainName: z.string(), liquidityUsd: z.number() }))
+      .optional(),
+  })
+  .passthrough();
+
 const reportSchema = z.object({
   target: z.string(),
   verdict: z.enum(['SAFE', 'SUSPICIOUS', 'HONEYPOT', 'ERROR']),
   riskScore: z.number(),
   summary: z.string(),
+  // Multi-chain + enrichment (optional so older worker builds still validate).
+  chain: z.string().optional(),
+  chainName: z.string().optional(),
+  tokenInfo: tokenInfoSchema.optional(),
   roundTrip: z.union([z.record(z.unknown()), z.null()]),
   balanceDiff: z.array(z.unknown()),
   storageDiff: z.array(z.unknown()),

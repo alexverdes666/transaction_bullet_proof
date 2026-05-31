@@ -26,6 +26,8 @@ export async function POST(req: NextRequest) {
       return fail('Slow down — too many scans per minute.', 429);
     }
 
+    // `chain` is accepted (optional) for power users, but the default flow
+    // auto-detects the chain on the worker — the UI no longer asks the user.
     const { token, chain } = scanSchema.parse(await req.json());
     await connectDb();
 
@@ -54,17 +56,20 @@ export async function POST(req: NextRequest) {
       return fail('The scan engine is temporarily unavailable. Your credit was not used.', 503);
     }
 
+    // Store the chain the worker actually scanned (auto-detected), falling back
+    // to the requested/ default for info-only ERROR reports where none ran.
+    const scannedChain = report.chain ?? chain ?? 'ethereum';
     await Scan.create({
       userId: user.id,
       token,
-      chain: chain ?? 'ethereum',
+      chain: scannedChain,
       verdict: report.verdict,
       riskScore: report.riskScore,
       summary: report.summary,
       report,
       durationMs: report.durationMs,
     });
-    await audit({ type: 'scan', ctx, userId: user.id, detail: { token, chain: chain ?? 'ethereum', verdict: report.verdict, risk: report.riskScore } });
+    await audit({ type: 'scan', ctx, userId: user.id, detail: { token, chain: scannedChain, verdict: report.verdict, risk: report.riskScore } });
 
     return json({ ok: true, report, creditsRemaining: spent.credits });
   } catch (e) {

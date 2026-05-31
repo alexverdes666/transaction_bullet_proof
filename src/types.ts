@@ -6,6 +6,7 @@
  * is rendered to a string via {@link serialize}.
  */
 import type { Address, Hash } from 'viem';
+import type { TokenInfo } from './discover.js';
 
 /** A single ERC-20 / ETH balance reading for the test wallet. */
 export interface BalanceReading {
@@ -97,6 +98,12 @@ export interface HoneypotReport {
   verdict: 'SAFE' | 'SUSPICIOUS' | 'HONEYPOT' | 'ERROR';
   riskScore: number; // 0 (safe) .. 100 (definite honeypot)
   summary: string;
+  /** Chain the scan ran on (registry key, e.g. "bsc"), when known. */
+  chain?: string;
+  /** Human-readable chain name, e.g. "BNB Smart Chain". */
+  chainName?: string;
+  /** Auto-detected metadata about the token (image, price, links, age, …). */
+  tokenInfo?: TokenInfo;
   roundTrip: RoundTripResult | null;
   balanceDiff: BalanceDelta[];
   storageDiff: { label: string; account: Address; slot: Hash; before: Hash; after: Hash }[];

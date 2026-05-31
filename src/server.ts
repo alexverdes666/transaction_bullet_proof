@@ -18,6 +18,7 @@ import { config } from './config.js';
 import { runScan } from './scan.js';
 import { stopAllForks } from './anvil.js';
 import { isSupportedChain, resolveChain, CHAINS } from './chains.js';
+import { discoverToken, type Discovery } from './discover.js';
 import { jsonSafe } from './util.js';
 
 // Shared secret gating /scan. Set in production (Render); when present it is
@@ -101,8 +102,26 @@ async function runScanWithTimeout(
   chain: string | undefined,
 ) {
   const { AnvilFork } = await import('./anvil.js');
-  // Resolve the chain (defaults to Ethereum); its RPC + chainId drive the fork.
-  const resolved = resolveChain(chain);
+
+  // Auto-detect the chain when the caller didn't pin one. Detection is plain
+  // HTTP/RPC (no fork) and internally bounded, so do it before the fork race.
+  let chainKey = chain;
+  let discovery: Discovery | undefined;
+  if (!chainKey) {
+    discovery = await discoverToken(token);
+    chainKey = discovery.chainKey;
+    if (!chainKey) {
+      // Detected on an unsupported chain, or not found at all — runScan returns a
+      // helpful info-only ERROR report without ever needing a fork.
+      return runScan({
+        token,
+        discovery,
+        ...(buyEth !== undefined ? { buyEth } : {}),
+      });
+    }
+  }
+
+  const resolved = resolveChain(chainKey);
   const fork = new AnvilFork();
 
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -119,7 +138,8 @@ async function runScanWithTimeout(
     return runScan({
       token,
       fork,
-      ...(chain !== undefined ? { chain } : {}),
+      chain: chainKey,
+      ...(discovery ? { discovery } : {}),
       ...(buyEth !== undefined ? { buyEth } : {}),
     });
   })();

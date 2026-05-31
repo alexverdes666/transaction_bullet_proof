@@ -3,8 +3,8 @@
  * target token and returns a fully-formed {@link HoneypotReport}.
  *
  * Flow:
- *   start fork -> fund wallet -> snapshot(before) -> buy/sell round-trip ->
- *   snapshot(after) -> state diff -> analyze -> report
+ *   detect chain (if not given) -> start fork -> fund wallet -> snapshot(before)
+ *   -> buy/sell round-trip -> snapshot(after) -> state diff -> analyze -> report
  *
  * The interaction is the deterministic on-chain buy/sell round-trip — the
  * bulletproof core. No browser required.
@@ -14,7 +14,8 @@ import { AnvilFork } from './anvil.js';
 import { config } from './config.js';
 import { makePublicClient, makeWalletClient, testAccount } from './clients.js';
 import { erc20Abi } from './abi.js';
-import { resolveChain } from './chains.js';
+import { resolveChain, type ChainConfig } from './chains.js';
+import { discoverToken, type TokenInfo, type Discovery } from './discover.js';
 import { fundWallet } from './wallet.js';
 import { captureSnapshotEx } from './snapshot.js';
 import { simulateRoundTrip } from './honeypot.js';
@@ -46,21 +47,19 @@ function sanitizeRpcUrl(raw: string): string {
 export interface ScanOptions {
   token: string;
   buyEth?: number;
-  /** Chain key (e.g. "ethereum", "bsc"). Defaults to Ethereum. */
+  /** Chain key (e.g. "ethereum", "bsc"). When omitted, the chain is auto-detected. */
   chain?: string;
+  /** Pre-computed discovery (from the worker), so we don't look it up twice. */
+  discovery?: Discovery;
   /** Reuse an already-running fork instead of spawning a new one. */
   fork?: AnvilFork;
 }
 
 /**
- * Fail fast with a plain-English reason when the address isn't a scannable ERC-20
- * on the selected chain, instead of surfacing a raw viem error ("balanceOf
- * returned no data (0x)…") deep from captureSnapshot. The two common cases: a
- * non-contract address (a wallet, or a token that lives on a DIFFERENT chain than
- * the one selected), and a contract that doesn't implement ERC-20 balanceOf (an
- * NFT, a proxy, etc.). Thrown errors flow through runScan's catch into a clean
- * ERROR report. `chainName` names the chain we actually forked, so the message
- * tells the user where we looked.
+ * Confirm the address is an ERC-20 on the forked chain before the heavy pipeline,
+ * turning a deep raw viem error ("balanceOf returned no data (0x)…") into a clear
+ * message. Auto-detect normally guarantees this, but a manual chain override (or
+ * a token that's a contract-but-not-ERC-20) still needs the guard.
  */
 async function assertScannableToken(
   client: PublicClient,
@@ -71,9 +70,7 @@ async function assertScannableToken(
   if (!code || code === '0x') {
     throw new Error(
       `Not a token contract on ${chainName}. This looks like a wallet address, ` +
-        'or a token deployed on a different chain. Pick the correct network for ' +
-        'this address (Bullet Proof supports Ethereum, BNB Chain, Polygon, Base, ' +
-        'Arbitrum and Avalanche).',
+        'or a token deployed on a different chain.',
     );
   }
   try {
@@ -87,22 +84,72 @@ async function assertScannableToken(
     throw new Error(
       "This contract doesn't implement the standard ERC-20 balanceOf function, " +
         `so it is not a token Bullet Proof can scan on ${chainName} (it may be an ` +
-        'NFT, a proxy contract, or a token on another chain).',
+        'NFT or a proxy contract).',
     );
   }
+}
+
+/** Build a structured ERROR report without running (or needing) a fork. */
+function errorReport(
+  token: Address,
+  message: string,
+  chain: ChainConfig | undefined,
+  tokenInfo: TokenInfo | undefined,
+  started: number,
+): HoneypotReport {
+  return {
+    target: token,
+    verdict: 'ERROR',
+    riskScore: 0,
+    summary: `Scan could not complete: ${message}`,
+    ...(chain ? { chain: chain.key, chainName: chain.name } : {}),
+    ...(tokenInfo ? { tokenInfo } : {}),
+    roundTrip: null,
+    balanceDiff: [],
+    storageDiff: [],
+    anomalies: [{ severity: 'critical', code: 'SCAN_ERROR', message }],
+    fork: {
+      rpcUrl: chain ? sanitizeRpcUrl(chain.rpcUrl) : '',
+      blockNumber: '0',
+      chainId: chain?.chainId ?? 0,
+    },
+    durationMs: Date.now() - started,
+    generatedAt: new Date().toISOString(),
+  };
 }
 
 export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
   const started = Date.now();
   const token = getAddress(opts.token);
   const buyEth = opts.buyEth ?? config.wallet.buyEth;
-  // Resolve the target chain (throws on an unsupported key). All chain-specific
-  // values — fork RPC, DEX router, wrapped-native, reported chainId — come from here.
-  const chain = resolveChain(opts.chain);
+
+  // --- Resolve the chain --------------------------------------------------
+  // Manual override wins; otherwise auto-detect (DexScreener + RPC probe).
+  let chain: ChainConfig;
+  let tokenInfo: TokenInfo | undefined;
+  if (opts.chain) {
+    chain = resolveChain(opts.chain);
+    tokenInfo = opts.discovery?.info;
+  } else {
+    const discovery = opts.discovery ?? (await discoverToken(token));
+    tokenInfo = discovery.info;
+    if (!discovery.chainKey) {
+      // Detected somewhere we can't simulate, or not found at all — return a
+      // helpful info-only ERROR (no fork spun).
+      const where = discovery.info.detectedChainName;
+      const msg =
+        discovery.info.detectedVia === 'none'
+          ? "Couldn't find this token on any supported network. Make sure it's a " +
+            'token contract address on Ethereum, BNB Chain, Polygon, Base, Arbitrum or Avalanche.'
+          : `This token was detected on ${where}, which Bullet Proof can't simulate trades ` +
+            'on yet. The info below is what we could gather; the buy/sell honeypot test ' +
+            'is only available on Ethereum, BNB Chain, Polygon, Base, Arbitrum and Avalanche.';
+      return errorReport(token, msg, undefined, tokenInfo, started);
+    }
+    chain = resolveChain(discovery.chainKey);
+  }
 
   const ownsFork = !opts.fork;
-  // When we own the fork, point it at the resolved chain's RPC. When the caller
-  // supplies a fork (worker path) it was already started for this chain.
   const fork = opts.fork ?? new AnvilFork();
   if (ownsFork) await fork.start({ quiet: true, forkUrl: chain.rpcUrl, chainId: chain.chainId });
 
@@ -111,11 +158,9 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
     const walletClient = makeWalletClient(fork.endpoint, chain.chainId, chain.nativeSymbol);
     const wallet = testAccount.address;
 
-    // Reject wrong-chain / non-ERC-20 addresses up front with a clear message,
-    // rather than letting balanceOf fail with a raw viem dump mid-pipeline.
     await assertScannableToken(publicClient, token, chain.name);
 
-    // a. Fund the mock retail wallet with local ETH.
+    // a. Fund the mock retail wallet with local native gas.
     await fundWallet(fork, wallet);
 
     // b. Record the "before" snapshot (and a revertible EVM checkpoint).
@@ -141,12 +186,7 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
       weth: chain.weth,
     });
 
-    // After-interaction snapshot. PERF-1: if the before-snapshot already located
-    // the balance slot (the wallet held the token pre-trade), reuse it so we skip
-    // a second brute-force discovery. The mapping base slot is immutable, so this
-    // is exact. When the before-snapshot found nothing (the usual case: balance
-    // was zero pre-buy, so the slot is undiscoverable then), we fall through to a
-    // fresh discovery here — preserving the original behaviour.
+    // After-interaction snapshot (reuse the discovered balance slot — PERF-1).
     const after = (
       await captureSnapshotEx({
         fork,
@@ -159,6 +199,20 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
       })
     ).snapshot;
 
+    // Enrich tokenInfo with on-chain name/symbol/decimals when discovery didn't
+    // already provide them (e.g. manual chain override with no DexScreener data).
+    if (!tokenInfo || !tokenInfo.symbol) {
+      const onchain = await readOnchainMeta(publicClient, token);
+      tokenInfo = {
+        detectedVia: tokenInfo?.detectedVia ?? 'rpc-probe',
+        detectedChainId: chain.dexscreenerId,
+        detectedChainName: chain.name,
+        explorerUrl: `${chain.explorer}/token/${token}`,
+        ...onchain,
+        ...tokenInfo,
+      };
+    }
+
     // d. Strict state diff.
     const balanceDiff = diffBalances(before, after);
     const storageDiff = diffStorage(before, after);
@@ -169,6 +223,9 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
       verdict,
       riskScore,
       summary: summarize(verdict, riskScore, roundTrip),
+      chain: chain.key,
+      chainName: chain.name,
+      ...(tokenInfo ? { tokenInfo } : {}),
       roundTrip,
       balanceDiff,
       storageDiff,
@@ -183,29 +240,26 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
     };
     return report;
   } catch (err) {
-    // Surface infra failures as a structured ERROR report rather than throwing.
-    return {
-      target: token,
-      verdict: 'ERROR',
-      riskScore: 0,
-      summary: `Scan failed: ${(err as Error).message}`,
-      roundTrip: null,
-      balanceDiff: [],
-      storageDiff: [],
-      anomalies: [
-        { severity: 'critical', code: 'SCAN_ERROR', message: (err as Error).message },
-      ],
-      fork: {
-        rpcUrl: sanitizeRpcUrl(chain.rpcUrl),
-        blockNumber: '0',
-        chainId: chain.chainId,
-      },
-      durationMs: Date.now() - started,
-      generatedAt: new Date().toISOString(),
-    };
+    return errorReport(token, (err as Error).message, chain, tokenInfo, started);
   } finally {
     if (ownsFork) await fork.stop();
   }
+}
+
+/** Lightweight on-chain ERC-20 read used to fill tokenInfo when discovery was thin. */
+async function readOnchainMeta(client: PublicClient, token: Address): Promise<Partial<TokenInfo>> {
+  const [name, symbol, decimals, totalSupply] = await Promise.all([
+    client.readContract({ address: token, abi: erc20Abi, functionName: 'name' }).catch(() => undefined),
+    client.readContract({ address: token, abi: erc20Abi, functionName: 'symbol' }).catch(() => undefined),
+    client.readContract({ address: token, abi: erc20Abi, functionName: 'decimals' }).catch(() => undefined),
+    client.readContract({ address: token, abi: erc20Abi, functionName: 'totalSupply' }).catch(() => undefined),
+  ]);
+  return {
+    ...(name !== undefined ? { name: String(name) } : {}),
+    ...(symbol !== undefined ? { symbol: String(symbol) } : {}),
+    ...(decimals !== undefined ? { decimals: Number(decimals) } : {}),
+    ...(totalSupply !== undefined ? { totalSupply: String(totalSupply) } : {}),
+  };
 }
 
 function summarize(
