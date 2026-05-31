@@ -285,6 +285,20 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
   }
 
   const roundTrip = sim?.roundTrip ?? null;
+  // Be honest when the verdict rests on static analysis alone: no fork sim ran
+  // (chain not forkable / fork failed) AND honeypot.is couldn't simulate either.
+  const anomalies: Anomaly[] = agg.hadLiveSim
+    ? agg.anomalies
+    : [
+        {
+          severity: 'warning',
+          code: 'NO_LIVE_SIM',
+          message:
+            'No live buy/sell simulation was possible on this chain — this verdict is ' +
+            'based on static security analysis only, so treat it as a guide, not a guarantee.',
+        },
+        ...agg.anomalies,
+      ];
   return {
     target: token,
     verdict: agg.verdict,
@@ -297,7 +311,7 @@ export async function runScan(opts: ScanOptions): Promise<HoneypotReport> {
     roundTrip,
     balanceDiff: sim?.balanceDiff ?? [],
     storageDiff: sim?.storageDiff ?? [],
-    anomalies: agg.anomalies,
+    anomalies,
     fork: {
       rpcUrl: chain ? sanitizeRpcUrl(chain.rpcUrl) : '',
       blockNumber: sim?.blockNumber ?? '0',

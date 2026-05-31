@@ -186,14 +186,14 @@ export async function discoverToken(address: string): Promise<Discovery> {
     const best = pairs.reduce((a, b) =>
       (b.liquidity?.usd ?? 0) > (a.liquidity?.usd ?? 0) ? b : a,
     );
-    const bestDexChain = best.chainId ?? '';
-    // Prefer a SIMULATABLE chain: the most-liquid chain we actually support. If
-    // the top chain isn't supported, fall back to the highest-liquidity one that is.
-    const supportedRanked = tradesOn.find((x) => chainKeyFromDexscreener(x.chain));
-    const chainKey = supportedRanked ? chainKeyFromDexscreener(supportedRanked.chain) : undefined;
-    const detectedDexChain = chainKey
-      ? CHAINS[chainKey]!.dexscreenerId
-      : bestDexChain;
+    // Analyze where the token is MOST active (highest aggregate liquidity),
+    // regardless of whether we can fork it: the external detectors (GoPlus /
+    // honeypot.is) cover chains we can't simulate, so there's no longer a reason
+    // to bias detection toward a forkable chain — that previously mis-routed an
+    // address that exists on both a forkable and a busier non-forkable chain.
+    const detectedDexChain = tradesOn[0]?.chain ?? best.chainId ?? '';
+    // We run our OWN deep simulation only when that primary chain is forkable.
+    const chainKey = chainKeyFromDexscreener(detectedDexChain);
 
     const info: TokenInfo = {
       detectedVia: 'dexscreener',

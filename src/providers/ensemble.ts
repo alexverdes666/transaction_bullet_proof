@@ -46,6 +46,8 @@ export interface Aggregate {
   buyTax: number | null;
   /** Number of providers that produced a usable result. */
   usableCount: number;
+  /** Did at least one LIVE-simulation detector (our sim / honeypot.is) run? */
+  hadLiveSim: boolean;
 }
 
 export function aggregate(results: ProviderResult[]): Aggregate {
@@ -54,9 +56,10 @@ export function aggregate(results: ProviderResult[]): Aggregate {
 
   const usable = results.filter((r) => r.ok);
   if (usable.length === 0) {
-    return { verdict: 'ERROR', riskScore: 0, anomalies: [], sellTax: null, buyTax: null, usableCount: 0 };
+    return { verdict: 'ERROR', riskScore: 0, anomalies: [], sellTax: null, buyTax: null, usableCount: 0, hadLiveSim: false };
   }
 
+  const hadLiveSim = usable.some((r) => SIM_SOURCES.has(r.source));
   const honeypotVotes = usable.filter((r) => r.isHoneypot === true);
   const simHoneypot = honeypotVotes.some((r) => SIM_SOURCES.has(r.source));
 
@@ -98,7 +101,7 @@ export function aggregate(results: ProviderResult[]): Aggregate {
     null,
   );
 
-  return { verdict, riskScore: risk, anomalies, sellTax, buyTax, usableCount: usable.length };
+  return { verdict, riskScore: risk, anomalies, sellTax, buyTax, usableCount: usable.length, hadLiveSim };
 }
 
 /**
