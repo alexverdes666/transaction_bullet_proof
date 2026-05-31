@@ -200,6 +200,7 @@ export async function simulatePairRoundTrip(inputs: PairSwapInputs): Promise<Rou
       result.buyGasUsed = buy.gasUsed;
       result.tokensExpected = out;
       result.ethSpent = amountIn;
+      result.revertReason = null; // clear the wrong-fee probe noise; the buy succeeded
       break;
     }
     await fork.revert(snap); // wrong fee (K revert) or transient — undo and retry
